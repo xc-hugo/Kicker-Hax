@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kicker Hax</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- TOP BAR -->
+  <div class="topbar" id="topbar">
+    <div class="pill" id="score">0 : 0</div>
+    <div class="pill"><span class="subpill">Tempo</span> <span id="clock">00:00</span></div>
+    <button id="btnFullscreen" class="pill btn">Tela Cheia</button>
+    <button id="openMenu" class="pill btn">Menu</button>
+  </div>
+
+  <!-- REPLAY overlay -->
+  <div class="replayBar" id="replayBar">
+    <div class="pill">REPLAY DO GOL</div>
+    <button class="pill btn" id="btnSkipReplay">Pular Replay</button>
+    <button class="pill btn" id="btnSaveReplay">Salvar Replay</button>
+  </div>
+  <div id="replayCaption" class="replayCaption"></div>
+
+  <div class="wrap">
+    <div class="stage" id="stage">
+      <aside class="side left">
+        <div class="sideTitle">P2 / CPU</div>
+        <div class="vbar"><div class="vlabel">ST</div><i id="leftStamFill"></i></div>
+        <div class="vbar"><div class="vlabel">PW</div><i id="leftPowFill"></i></div>
+      </aside>
+
+      <canvas id="game" width="1024" height="640" tabindex="0"></canvas>
+
+      <aside class="side right">
+        <div class="sideTitle">P1</div>
+        <div class="vbar"><div class="vlabel">ST</div><i id="rightStamFill"></i></div>
+        <div class="vbar"><div class="vlabel">PW</div><i id="rightPowFill"></i></div>
+      </aside>
+    </div>
+
+    <!-- Dicas fora da área do jogo -->
+    <div class="tipsDock" id="tipsDock">
+      <div class="pill help tiny" id="helpP1"></div>
+      <div class="pill help tiny" id="helpP2"></div>
+    </div>
+  </div>
+
+  <!-- MENU -->
+  <div id="menu" class="menu" aria-modal="true" role="dialog">
+    <div class="card" id="menuCard">
+      <h2>⚙️ Configurações</h2>
+      <span id="needsRestartNote" class="note" style="display:none">Algumas mudanças exigem&nbsp;<b>Reiniciar</b></span>
+
+      <div class="row">
+        <button id="btnPlay" class="btn tag">Jogar</button>
+        <button id="btnRestart" class="btn tag">Reiniciar</button>
+        <button id="btnFullscreen2" class="btn tag">Tela Cheia</button>
+        <span class="tag">Modo: <b id="modeLabel">—</b></span>
+        <button id="btnSolo" class="btn">Solo 1x1</button>
+        <button id="btnVersus" class="btn">Versus 2P</button>
+        <button id="btnResetMaps" class="btn push-right">Restaurar padrões</button>
+      </div>
+
+      <div class="row">
+        <input id="nameP1" class="tag inputlike" placeholder="Nome P1 (Azul)" value="P1"/>
+        <input id="nameP2" class="tag inputlike" placeholder="Nome P2 (Vermelho)" value="P2"/>
+      </div>
+
+      <!-- NOVO: Personalização (2 letras/emoji) separada dos nomes -->
+      <div class="row">
+        <input id="badgeP1" class="tag inputlike" placeholder="Personalização P1 (2 letras/emoji)" value=""/>
+        <input id="badgeP2" class="tag inputlike" placeholder="Personalização P2 (2 letras/emoji)" value=""/>
+        <span class="small hint">Dica: deixe vazio para usar a primeira letra/emoji do nome.</span>
+      </div>
+
+      <div class="row">
+        <span class="tag">Campo:
+          <button id="sizeSmall" class="btn">Peq</button>
+          <button id="sizeMedium" class="btn active">Méd</button>
+          <button id="sizeLarge" class="btn">Grd</button>
+          <span id="sizeLabel" class="tag">1024×640</span>
+        </span>
+        <span class="tag">Duração:
+          <button id="timeMinus" class="btn">−</button>
+          <input id="timeMinutes" class="tag num inputlike" type="number" min="1" max="30" step="1" value="3">
+          <button id="timePlus" class="btn">+</button>
+          <span class="small hint">min</span>
+        </span>
+      </div>
+
+      <h3 class="small section">🎮 Mapeamento de teclas</h3>
+      <div class="mapgrid small" id="mapGridP1">
+        <div class="hdr">Ação</div><div class="hdr">P1</div><div class="hdr">P2</div>
+      </div>
+
+      <div class="row end">
+        <button id="btnClose" class="btn">Fechar</button>
+      </div>
+      <p class="small foot">Escolha um <b>modo</b> e clique <b>Jogar</b>.</p>
+    </div>
+  </div>
+
+  <div class="pausedBadge" id="pausedBadge">⏸️ Pausado (fora da aba)</div>
+
+  <script src="game.js" defer></script>
+</body>
+</html>

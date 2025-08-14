@@ -1,0 +1,123 @@
+:root{
+  --ui:#0e1726; --fg:#e2e8f0; --accent:#22c55e; --accent-2:#3b82f6; --danger:#ef4444; --blur:4px;
+  --topbar-h: 64px;
+}
+
+html,body{margin:0;height:100%;background:#0b1020;color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Ubuntu,Arial;overscroll-behavior:none}
+body{overflow:hidden}
+
+/* Top bar */
+.topbar{position:fixed;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;z-index:6}
+.pill{background:var(--ui);border:1px solid rgba(255,255,255,.08);padding:10px 16px;border-radius:999px;font-size:20px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center;gap:10px;white-space:nowrap}
+.pill.btn{font-size:16px;font-weight:700}
+.subpill{font-size:14px;font-weight:600;opacity:.85}
+#modeLabel{display:inline-block;min-width:120px;text-align:center}
+
+/* palco */
+.wrap{display:grid;place-items:center;gap:12px;padding:12px}
+.stage{
+  display:grid; grid-template-columns:56px auto 56px; gap:8px; align-items:stretch;
+  margin: calc(var(--topbar-h) + 16px) auto 0 auto;
+  width:auto; height:auto;
+}
+canvas{
+  background:#1a2a36;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.45);
+  outline:none;display:block;width:auto;height:auto;
+}
+
+/* Laterais (barras fora do campo) */
+.side{display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.sideTitle{font:700 12px system-ui;opacity:.85;margin-top:2px}
+.vbar{
+  position:relative; width:16px; flex:1;
+  background:rgba(255,255,255,.08);
+  border-radius:10px; margin:6px 0; overflow:hidden;
+  display:flex; align-items:flex-end; justify-content:center;
+}
+.vbar .vlabel{
+  position:absolute; top:4px; left:50%; transform:translateX(-50%);
+  font:700 10px system-ui; color:#94a3b8; pointer-events:none;
+}
+.vbar>i{position:absolute; left:2px; right:2px; bottom:2px; height:0%; border-radius:8px}
+.left .vbar:nth-of-type(2)>i{ background:linear-gradient(180deg,#ef4444,#f97316)}
+.left .vbar:nth-of-type(3)>i{ background:linear-gradient(180deg,#f59e0b,#fbbf24)}
+.right .vbar:nth-of-type(2)>i{ background:linear-gradient(180deg,#22c55e,#10b981)}
+.right .vbar:nth-of-type(3)>i{ background:linear-gradient(180deg,#3b82f6,#60a5fa)}
+
+/* Dicas fora do jogo (fixa no fundo azul, SEM cortar) */
+.tipsDock{
+  position:fixed; bottom:8px; left:50%; transform:translateX(-50%);
+  display:flex; gap:6px; flex-wrap:wrap; justify-content:center; align-items:center;
+  max-width:96vw; z-index:7; padding:2px 6px;
+}
+.small{font-size:12px;opacity:.9}
+.help.tiny{font-size:9.5px;padding:4px 6px;white-space:normal}
+
+/* Menu */
+.menu{position:fixed;inset:0;display:none;place-items:center;background:rgba(2,6,23,.72);backdrop-filter:blur(var(--blur));z-index:10}
+.menu .card{
+  position:relative;background:#0b1222;border:1px solid rgba(255,255,255,.1);padding:18px;border-radius:16px;
+  min-width:520px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.45);
+  overflow:visible; transform-origin:top center;
+}
+.menu h2{margin:0 0 10px 0}
+.menu .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.menu .row.end{justify-content:flex-end}
+.menu button{background:#111a2e;border:1px solid rgba(255,255,255,.12);color:#e2e8f0;border-radius:10px;padding:10px 12px;font-weight:600;cursor:pointer}
+.menu button.active{outline:2px solid var(--accent)}
+.menu button:disabled,
+.menu .btn.disabled{opacity:.5;pointer-events:none}
+.menu .tag{background:#0f172a;border:1px solid rgba(255,255,255,.08);padding:6px 8px;border-radius:8px;font-size:12px}
+.menu .tag.num{width:56px;text-align:center}
+.menu .hint{margin-left:6px;opacity:.8}
+.menu .push-right{margin-left:auto}
+.menu .foot{opacity:.8;margin-top:8px}
+.menu .section{margin:14px 0 6px 0}
+.mapgrid{display:grid;grid-template-columns:auto 160px 160px;gap:6px;align-items:center}
+.mapgrid .hdr{font-weight:700;opacity:.9}
+.mapbtn{width:160px}
+.mapbtn.warn{outline:2px solid var(--danger)}
+
+/* Campos de DIGITAR em branco (nomes, personalização e tempo) */
+.inputlike{color:#fff !important; background:#0f172a; border:1px solid rgba(255,255,255,.12); border-radius:8px;}
+.inputlike::placeholder{color:rgba(255,255,255,.55);}
+
+/* Mensagem flutuante sem aumentar o card */
+.menu .card .flash{
+  position:absolute; left:50%; transform:translateX(-50%);
+  top:8px; background:#0f172a; border:1px solid rgba(255,255,255,.18);
+  padding:6px 10px; border-radius:999px; font:700 12px system-ui; color:#e2e8f0;
+  opacity:0; pointer-events:none; transition:opacity .15s ease, transform .15s ease;
+}
+.menu .card .flash.show{ opacity:.96; transform:translateX(-50%) translateY(2px); }
+
+/* Nota fixa */
+.note{
+  position:absolute; right:16px; top:16px;
+  background:#0f172a;border:1px solid rgba(255,255,255,.18);
+  padding:4px 8px;border-radius:8px;font-size:12px;color:#e2e8f0;opacity:.96;
+}
+
+/* Replay */
+.replayBar{
+  position:fixed;top:calc(var(--topbar-h) + 14px);left:50%;transform:translateX(-50%);
+  display:none;gap:12px;align-items:center;z-index:5
+}
+.replayBar .pill{padding:8px 12px;font-size:14px}
+.replayCaption{
+  position:fixed; left:50%; transform:translateX(-50%); bottom:24px; z-index:5; display:none;
+  background:rgba(2,6,23,.88); color:#e2e8f0; padding:8px 14px; border-radius:10px; border:1px solid rgba(255,255,255,.12); font:600 14px system-ui;
+}
+
+/* Clique animado */
+button, .pill.btn { position:relative; overflow:hidden; transition:transform .08s ease, box-shadow .12s ease, background-color .2s ease; }
+button:hover, .pill.btn:hover { box-shadow:0 6px 18px rgba(0,0,0,.25); }
+button:active, .pill.btn:active { transform:translateY(1px) scale(0.98); }
+.btn { cursor:pointer; }
+.ripple { position:absolute; border-radius:50%; transform:scale(0);
+  background:radial-gradient(circle, rgba(255,255,255,.35) 0%, rgba(255,255,255,.15) 40%, rgba(255,255,255,0) 70%);
+  animation:ripple .5s ease-out forwards; pointer-events:none; }
+@keyframes ripple { to { transform:scale(12); opacity:0; } }
+
+.pausedBadge{position:fixed;right:14px;bottom:14px;background:#0b1222;border:1px solid rgba(255,255,255,.12);padding:8px 10px;border-radius:10px;font-size:12px;opacity:0;transform:translateY(6px);transition:opacity .2s ease, transform .2s ease;z-index:6}
+.pausedBadge.show{opacity:.9;transform:none}
