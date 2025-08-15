@@ -1,109 +1,565 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kicker Hax</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <!-- TOP BAR -->
-  <div class="topbar" id="topbar">
-    <div class="pill" id="score">0 : 0</div>
-    <div class="pill"><span class="subpill">Tempo</span> <span id="clock">00:00</span></div>
-    <button id="btnFullscreen" class="pill btn">Tela Cheia</button>
-    <button id="openMenu" class="pill btn">Menu</button>
-  </div>
+<script type="module">
+// =========================
+// ✅ CONFIG FIREBASE (do seu console)
+// =========================
+const firebaseConfig = {
+  apiKey: "AIzaSyBaVBJL8ibAFb8Pt9iKEQc753yruXhdBCw",
+  authDomain: "kicker-hax-online.firebaseapp.com",
+  projectId: "kicker-hax-online",
+  storageBucket: "kicker-hax-online.firebasestorage.app",
+  messagingSenderId: "605132743845",
+  appId: "1:605132743845:web:57f9641f5360689b17194c",
+  measurementId: "G-6V2XVYZYL4"
+};
 
-  <!-- REPLAY overlay -->
-  <div class="replayBar" id="replayBar">
-    <div class="pill">REPLAY DO GOL</div>
-    <button class="pill btn" id="btnSkipReplay">Pular Replay</button>
-    <button class="pill btn" id="btnSaveReplay">Salvar Replay</button>
-  </div>
-  <div id="replayCaption" class="replayCaption"></div>
+// Guardas e helpers UI
+const $  = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const flash = (el, msg) => { el.textContent = msg; el.classList.add("show"); setTimeout(()=>el.classList.remove("show"), 1400); };
 
-  <div class="wrap">
-    <div class="stage" id="stage">
-      <aside class="side left">
-        <div class="sideTitle">P2 / CPU</div>
-        <div class="vbar"><div class="vlabel">ST</div><i id="leftStamFill"></i></div>
-        <div class="vbar"><div class="vlabel">PW</div><i id="leftPowFill"></i></div>
-      </aside>
+// Ripple
+const rippleize = (e) => {
+  const b = e.currentTarget;
+  const r = document.createElement("span");
+  const d = Math.max(b.clientWidth, b.clientHeight);
+  r.className = "ripple";
+  r.style.width = r.style.height = d+"px";
+  const rect = b.getBoundingClientRect();
+  r.style.left = (e.clientX - rect.left - d/2) + "px";
+  r.style.top  = (e.clientY - rect.top  - d/2) + "px";
+  b.appendChild(r); setTimeout(()=>r.remove(), 500);
+};
+$$(".btn, .pill.btn").forEach(b => b.addEventListener("click", rippleize));
 
-      <canvas id="game" width="1024" height="640" tabindex="0"></canvas>
+// Abrir/fechar lobby
+const onlineModal = $("#online");
+const openOnline  = () => { onlineModal.style.display = "grid"; onlineModal.dataset.open = "1"; };
+const closeOnline = () => { onlineModal.style.display = "none"; onlineModal.dataset.open = "0"; };
+$("#openOnline").onclick       = openOnline;
+$("#btnOnlineLobby").onclick   = openOnline;
+$("#btnCloseOnline").onclick   = closeOnline;
 
-      <aside class="side right">
-        <div class="sideTitle">P1</div>
-        <div class="vbar"><div class="vlabel">ST</div><i id="rightStamFill"></i></div>
-        <div class="vbar"><div class="vlabel">PW</div><i id="rightPowFill"></i></div>
-      </aside>
+// Perfil local
+const profile = {
+  name: localStorage.getItem("kh_name") || "",
+  tag:  localStorage.getItem("kh_tag")  || ""
+};
+$("#meName").value = profile.name;
+$("#meTag").value  = profile.tag;
+$("#btnSaveProfile").onclick = () => {
+  profile.name = $("#meName").value.trim() || `Jogador_${Math.random().toString(36).slice(2,5)}`;
+  profile.tag  = ($("#meTag").value.trim().slice(0,2) || "⚽");
+  localStorage.setItem("kh_name", profile.name);
+  localStorage.setItem("kh_tag",  profile.tag);
+  flash($("#onlineFlash"), "Perfil salvo");
+};
+
+// ====== Firebase init (compat, usando top-level await) ======
+let db = null, myUid = null;
+let fbReady = false;
+try {
+  if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+  await firebase.auth().signInAnonymously();
+  myUid = firebase.auth().currentUser.uid;
+  fbReady = true;
+  console.log("[FB] signed in anon:", myUid);
+
+  // Wrapper compat p/ listener de fim de partida
+  window.__firebase = {
+    db,
+    collection: (_db, name) => _db.collection(name),
+    addDoc: (colRef, data)   => colRef.add(data),
+    serverTimestamp: () => firebase.firestore.FieldValue.serverTimestamp()
+  };
+} catch (e) {
+  console.warn("Firebase não inicializado (verifique config/Auth/Firestore).", e);
+  $("#onlineNote").textContent = "Cole sua configuração do Firebase (Auth Anônima + Firestore) para habilitar o lobby.";
+}
+
+// ====== UI auxiliar (painel de espera do cliente) ======
+let clientWait = null, clientWaitList = null, clientWaitInfo = null;
+function ensureClientWaitUI(){
+  if (clientWait) return;
+  clientWait = document.createElement("div");
+  clientWait.className = "hostpanel"; // reaproveita visual
+  clientWait.innerHTML = `
+    <h3 class="small">⏳ Aguardando o host iniciar</h3>
+    <div class="row"><span id="cwInfo" class="small hint">Conectado…</span></div>
+    <div class="row">
+      <div class="col">
+        <h4>Jogadores na sala</h4>
+        <ul id="cwList" class="list"></ul>
+      </div>
     </div>
+  `;
+  clientWaitInfo = clientWait.querySelector("#cwInfo");
+  clientWaitList = clientWait.querySelector("#cwList");
+  $("#onlineCard").appendChild(clientWait);
+}
+function showClientWait(){
+  ensureClientWaitUI();
+  clientWait.style.display = "";
+  $("#hostPanel").classList.add("hidden");
+  $("#onlineNote").textContent = "Conectado. Aguarde o host iniciar a partida.";
+  openOnline();
+}
+function hideClientWait(){
+  if (clientWait) clientWait.style.display = "none";
+}
 
-    <!-- Dicas fora da área do jogo -->
-    <div class="tipsDock" id="tipsDock">
-      <div class="pill help tiny" id="helpP1"></div>
-      <div class="pill help tiny" id="helpP2"></div>
+function renderClientWait(state){
+  if (!clientWaitList) return;
+  clientWaitList.innerHTML = "";
+  (state?.players || []).forEach(p=>{
+    const li = document.createElement("li");
+    li.className="player";
+    li.textContent = `${p.tag||"⚽"} ${p.name||"Jogador"}` + (p.team ? ` — Time ${p.team}` : "");
+    clientWaitList.appendChild(li);
+  });
+  clientWaitInfo && (clientWaitInfo.textContent = `${(state?.players||[]).length} conectado(s) • modo ${state?.preset||'classic'} • ${state?.teamSize||1}×${state?.teamSize||1}`);
+}
+
+// ====== NET P2P (SimplePeer + Firestore p/ sinalização) ======
+const Net = (()=>{
+  const peers = new Map(); // clientId -> SimplePeer
+  const conns = new Map(); // clientId -> { peer, name, tag, team, uid, isSelf? }
+  let isHost = false;
+  let roomRef = null;
+  let roomDoc = null;
+  let unsubClients = null;
+  let myClientId = null;
+  let teamSize = 1;
+
+  const sha256 = async (s) => {
+    const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+    return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2,"0")).join("");
+  };
+  const code6 = () => {
+    const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let s=""; for (let i=0;i<6;i++) s+=a[(Math.random()*a.length)|0]; return s;
+  };
+
+  // ===== listRooms sem índice composto =====
+  async function listRooms(filterName = ""){
+    if (!fbReady) return [];
+    try{
+      const snap = await db.collection("rooms").orderBy("createdAt","desc").limit(40).get();
+      const rooms = [];
+      snap.forEach(doc=>{
+        const d = doc.data();
+        if (["open","starting"].includes(d.status)) {
+          if (!filterName || (d.name||"").toLowerCase().includes(filterName.toLowerCase()))
+            rooms.push({ id: doc.id, ...d });
+        }
+      });
+      return rooms;
+    }catch(e){
+      console.error("Erro ao listar salas:", e);
+      throw e;
+    }
+  }
+
+  // ===== criar sala e registrar o HOST como 1º cliente =====
+  async function createRoom({ name, password, preset, teamSizeSel }){
+    if (!fbReady) throw new Error("Firebase não configurado.");
+    isHost = true;
+    teamSize = Math.max(1, Math.min(6, Number(teamSizeSel || 1)));
+    const code = code6();
+
+    const payload = {
+      name: name || `Sala ${code}`,
+      ownerId: myUid,
+      code, status: "open",
+      hasPassword: !!password,
+      passHash: password ? await sha256(password) : null,
+      teamSize, preset: preset || "classic",
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    roomRef = await db.collection("rooms").add(payload);
+    roomDoc = (await roomRef.get()).data();
+
+    // Host vira "cliente" da própria sala (sem peer)
+    const selfDoc = {
+      uid: myUid,
+      name: profile.name || `Jog_${code6()}`,
+      tag:  profile.tag  || "⚽",
+      joinAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    await roomRef.collection("clients").doc(myUid).set(selfDoc);
+    myClientId = myUid;
+
+    // Aparecer no lobby do host e já começar no Time A
+    conns.set(myUid, { peer:null, clientId: myUid, uid: myUid, name: selfDoc.name, tag: selfDoc.tag, team: "A", isSelf:true });
+
+    hostWatchClients();
+    syncLobby(); // atualiza painel
+    return { id: roomRef.id, code };
+  }
+
+  async function closeRoom(){
+    if (!isHost || !roomRef) return;
+    await roomRef.update({ status: "closed" }).catch(()=>{});
+    for (const [,p] of peers) { try { p.destroy(); } catch{} }
+    peers.clear(); conns.clear(); if (unsubClients) { unsubClients(); unsubClients=null; }
+  }
+
+  async function joinByCode({ code, password }){
+    if (!fbReady) throw new Error("Firebase não configurado.");
+    const snap = await db.collection("rooms").where("code","==", String(code||"").toUpperCase()).limit(1).get();
+    if (snap.empty) throw new Error("Sala não encontrada.");
+    const doc = snap.docs[0];
+    const d = doc.data();
+    if (d.status!=="open" && d.status!=="starting") throw new Error("Sala fechada.");
+    if (d.hasPassword) {
+      const ok = (await sha256(password||"")) === d.passHash;
+      if (!ok) throw new Error("Senha inválida.");
+    }
+    roomRef = doc.ref; roomDoc = d; teamSize = d.teamSize || 1;
+
+    myClientId = myUid;
+    const clientRef = roomRef.collection("clients").doc(myClientId);
+    await clientRef.set({
+      uid: myUid, name: profile.name || `Jog_${code6()}`, tag: profile.tag || "⚽",
+      joinAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+
+    const peer = new SimplePeer({ initiator: true, trickle: true });
+    peers.set(myClientId, peer);
+
+    const clientSignals = clientRef.collection("clientSignals");
+    peer.on("signal", async data => { await clientSignals.add({ data, at: Date.now() }); });
+
+    clientRef.collection("hostSignals").onSnapshot(snap => {
+      snap.docChanges().forEach(ch => {
+        if (ch.type === "added" || ch.type === "modified") {
+          peer.signal(ch.doc.data().data);
+        }
+      });
+    });
+
+    peer.on("connect", () => {
+      conns.set(myClientId, { peer, clientId: myClientId, uid: myUid });
+      peer.send(JSON.stringify({ t:"hello", name: profile.name, tag: profile.tag, uid: myUid }));
+      // Mantém modal aberto em modo "espera"
+      showClientWait();
+    });
+    peer.on("data", raw => {
+      try { route(JSON.parse(new TextDecoder().decode(raw))); } catch {}
+    });
+    peer.on("close", () => leaveRoom());
+    peer.on("error", (e) => console.warn("peer err", e));
+  }
+
+  function route(msg){
+    if (msg.t === "lobby:update"){
+      renderClientWait(msg.state);
+    }
+    if (msg.t === "assign"){
+      // opcional: destacar time na UI de espera
+      renderClientWait({ ...(msg.state||{}), players:(msg.state?.players||[]) });
+    }
+    if (msg.t === "start"){
+      // Cliente: entregar pro motor e fechar o modal
+      try { window.KHNet?.onClientStart?.(msg); } catch(e){}
+      hideClientWait(); closeOnline();
+    }
+    if (msg.t === "snapshot"){
+      try { window.KHNet?.onClientSnapshot?.(msg.state); } catch(e){}
+    }
+    if (msg.t === "host:closed"){
+      flash($("#onlineFlash"), "Sala encerrada");
+      hideClientWait();
+      openOnline();
+    }
+  }
+
+  function hostWatchClients(){
+    if (!isHost || !roomRef) return;
+    if (unsubClients) unsubClients();
+
+    unsubClients = roomRef.collection("clients").onSnapshot(async (snap) => {
+      for (const ch of snap.docChanges()){
+        const clientId = ch.doc.id;
+        if (clientId === myUid) continue; // não cria peer com você mesmo
+
+        if (ch.type === "added"){
+          const peer = new SimplePeer({ initiator: false, trickle: true });
+          peers.set(clientId, peer);
+
+          roomRef.collection("clients").doc(clientId).collection("clientSignals").onSnapshot(s2 => {
+            s2.docChanges().forEach(dc => {
+              if (dc.type === "added" || dc.type === "modified") peer.signal(dc.doc.data().data);
+            });
+          });
+
+          const hostSignals = roomRef.collection("clients").doc(clientId).collection("hostSignals");
+          peer.on("signal", async data => { await hostSignals.add({ data, at: Date.now() }); });
+
+          peer.on("connect", async () => {
+            const cli = (await roomRef.collection("clients").doc(clientId).get()).data() || {};
+            conns.set(clientId, { peer, clientId, uid: cli.uid, name: cli.name, tag: cli.tag, team: null });
+            syncLobby();
+          });
+
+          peer.on("data", raw => {
+            try{
+              const msg = JSON.parse(new TextDecoder().decode(raw));
+              if (msg.t === "hello"){ /* ok */ }
+              else if (msg.t === "input"){
+                window.KHNet?.onClientInput?.(clientId, msg.data);
+              } else if (msg.t === "chat"){
+                broadcast({ t:"chat", from: clientId, text: msg.text });
+              }
+            }catch{}
+          });
+
+          peer.on("close", () => { conns.delete(clientId); peers.delete(clientId); syncLobby(); });
+          peer.on("error", (e) => console.warn("peer error(host)", e));
+        }
+
+        if (ch.type === "removed"){
+          try { peers.get(clientId)?.destroy(); } catch {}
+          peers.delete(clientId); conns.delete(clientId); syncLobby();
+        }
+      }
+    });
+  }
+
+  function broadcast(obj){
+    const data = new TextEncoder().encode(JSON.stringify(obj));
+    for (const { peer } of conns.values()){
+      if (peer && peer.connected) peer.send(data);
+    }
+  }
+  function unicast(clientId, obj){
+    const c = conns.get(clientId); if (!c?.peer?.connected) return;
+    c.peer.send(new TextEncoder().encode(JSON.stringify(obj)));
+  }
+  function broadcastSnapshot(state){
+    broadcast({ t:"snapshot", state });
+  }
+
+  function syncLobby(){
+    if (!isHost) return;
+    const players = [...conns.entries()].map(([clientId, v]) => ({ clientId, name: v.name, tag: v.tag, team: v.team || null }));
+    broadcast({ t:"lobby:update", state: { players, teamSize, preset: roomDoc?.preset || "classic" }});
+    uiLobby({ players });
+  }
+
+  function setTeam(clientId, teamStr){
+    const c = conns.get(clientId); if (!c) return;
+    c.team = teamStr;
+    if (c.peer) unicast(clientId, { t:"assign", clientId, team: teamStr });
+    syncLobby();
+  }
+
+  function autoBalance(){
+    const ids = [...conns.keys()];
+    let a=0,b=0;
+    for (const id of ids){
+      if (a<=b) { setTeam(id,"A"); a++; } else { setTeam(id,"B"); b++; }
+    }
+  }
+
+  function startMatch(){
+    const teamA = [...conns.values()].filter(v => v.team === "A");
+    const teamB = [...conns.values()].filter(v => v.team === "B");
+    if (teamA.length !== teamSize || teamB.length !== teamSize){
+      alert(`Cada time precisa ter exatamente ${teamSize} jogadores.`);
+      return;
+    }
+    const payload = {
+      preset: roomDoc?.preset || "classic",
+      teamSize,
+      teams: {
+        A: teamA.map(v=>({ clientId:v.clientId, name:v.name, tag:v.tag })),
+        B: teamB.map(v=>({ clientId:v.clientId, name:v.name, tag:v.tag }))
+      }
+    };
+    broadcast({ t:"start", ...payload });
+    // Host -> motor do jogo
+    try { window.KHNet?.onHostStart?.(payload); } catch(e){}
+  }
+
+  function sendInput(input){
+    const c = conns.get(myClientId);
+    if (c?.peer?.connected) c.peer.send(new TextEncoder().encode(JSON.stringify({ t:"input", data: input })));
+  }
+
+  async function leaveRoom(){
+    try{
+      if (isHost){
+        broadcast({ t:"host:closed" });
+        await closeRoom();
+      } else {
+        if (roomRef && myClientId) await roomRef.collection("clients").doc(myClientId).delete().catch(()=>{});
+        try { peers.get(myClientId)?.destroy(); } catch {}
+        peers.clear(); conns.clear();
+      }
+    } finally {
+      isHost=false; roomRef=null; roomDoc=null; myClientId=null;
+    }
+  }
+
+  // UI helper do host
+  function uiLobby({ players }){
+    const panelVisible = !$("#hostPanel").classList.contains("hidden");
+    if (!panelVisible) return;
+    const ulA=$("#teamA"), ulB=$("#teamB"), ulConn=$("#connectedPlayers");
+    ulA.innerHTML=""; ulB.innerHTML=""; ulConn.innerHTML="";
+    for (const p of players){
+      const li=document.createElement("li");
+      li.className="player";
+      li.draggable=true;
+      li.dataset.clientId=p.clientId;
+      li.textContent=`${p.tag||""} ${p.name||"(?)"}`;
+      li.addEventListener("dragstart", e => e.dataTransfer.setData("text/plain", p.clientId));
+      if (p.team==="A") ulA.appendChild(li);
+      else if (p.team==="B") ulB.appendChild(li);
+      else ulConn.appendChild(li);
+    }
+  }
+
+  return {
+    listRooms, createRoom, closeRoom, joinByCode, leaveRoom,
+    setTeam, autoBalance, startMatch, sendInput,
+    broadcastSnapshot
+  };
+})();
+
+// ====== UI LOBBY HOOKS ======
+function roomCard(r){
+  const el = document.createElement("div");
+  el.className = "room";
+  el.innerHTML = `
+    <h4>${r.name || "(sem nome)"} <span class="chip">${r.code}</span></h4>
+    <div class="chips">
+      <span class="chip">${(r.teamSize||1)}×${(r.teamSize||1)}</span>
+      <span class="chip">${r.preset||"classic"}</span>
+      <span class="chip">${r.status}</span>
+      ${r.hasPassword ? '<span class="chip">🔒</span>' : ''}
     </div>
-  </div>
-
-  <!-- MENU -->
-  <div id="menu" class="menu" aria-modal="true" role="dialog">
-    <div class="card" id="menuCard">
-      <h2>⚙️ Configurações</h2>
-      <span id="needsRestartNote" class="note" style="display:none">Algumas mudanças exigem&nbsp;<b>Reiniciar</b></span>
-
-      <div class="row">
-        <button id="btnPlay" class="btn tag">Jogar</button>
-        <button id="btnRestart" class="btn tag">Reiniciar</button>
-        <button id="btnFullscreen2" class="btn tag">Tela Cheia</button>
-        <span class="tag">Modo: <b id="modeLabel">—</b></span>
-        <button id="btnSolo" class="btn">Solo 1x1</button>
-        <button id="btnVersus" class="btn">Versus 2P</button>
-        <button id="btnResetMaps" class="btn push-right">Restaurar padrões</button>
-      </div>
-
-      <div class="row">
-        <input id="nameP1" class="tag inputlike" placeholder="Nome P1 (Azul)" value="P1"/>
-        <input id="nameP2" class="tag inputlike" placeholder="Nome P2 (Vermelho)" value="P2"/>
-      </div>
-
-      <!-- NOVO: Personalização (2 letras/emoji) separada dos nomes -->
-      <div class="row">
-        <input id="badgeP1" class="tag inputlike" placeholder="Personalização P1 (2 letras/emoji)" value=""/>
-        <input id="badgeP2" class="tag inputlike" placeholder="Personalização P2 (2 letras/emoji)" value=""/>
-        <span class="small hint">Dica: deixe vazio para usar a primeira letra/emoji do nome.</span>
-      </div>
-
-      <div class="row">
-        <span class="tag">Campo:
-          <button id="sizeSmall" class="btn">Peq</button>
-          <button id="sizeMedium" class="btn active">Méd</button>
-          <button id="sizeLarge" class="btn">Grd</button>
-          <span id="sizeLabel" class="tag">1024×640</span>
-        </span>
-        <span class="tag">Duração:
-          <button id="timeMinus" class="btn">−</button>
-          <input id="timeMinutes" class="tag num inputlike" type="number" min="1" max="30" step="1" value="3">
-          <button id="timePlus" class="btn">+</button>
-          <span class="small hint">min</span>
-        </span>
-      </div>
-
-      <h3 class="small section">🎮 Mapeamento de teclas</h3>
-      <div class="mapgrid small" id="mapGridP1">
-        <div class="hdr">Ação</div><div class="hdr">P1</div><div class="hdr">P2</div>
-      </div>
-
-      <div class="row end">
-        <button id="btnClose" class="btn">Fechar</button>
-      </div>
-      <p class="small foot">Escolha um <b>modo</b> e clique <b>Jogar</b>.</p>
+    <div class="row">
+      <input class="tag inputlike room-pass" placeholder="Senha (se houver)" type="password" />
+      <button class="btn">Entrar</button>
     </div>
-  </div>
+  `;
+  el.querySelector(".btn").onclick = async ()=>{
+    try{
+      await Net.joinByCode({ code: r.code, password: el.querySelector(".room-pass").value });
+      flash($("#onlineFlash"), `Entrou na sala ${r.code}`);
+      // não fecha: abre painel de espera
+      showClientWait();
+    }catch(e){ alert(e.message || String(e)); }
+  };
+  return el;
+}
 
-  <div class="pausedBadge" id="pausedBadge">⏸️ Pausado (fora da aba)</div>
+async function renderRooms(){
+  const filter = $("#searchName").value.trim();
+  const cont = $("#roomsList");
+  cont.innerHTML = "";
+  try{
+    const rooms = await Net.listRooms(filter);
+    if (!rooms.length){
+      cont.innerHTML = `<div class="room empty">Nenhuma sala aberta.</div>`;
+      return;
+    }
+    for (const r of rooms) cont.appendChild(roomCard(r));
+  }catch(e){
+    cont.innerHTML = `<div class="room empty">Erro ao listar salas (configure o Firebase).</div>`;
+  }
+}
+$("#refreshRooms").onclick = renderRooms;
+$("#btnJoinByCode").onclick = async ()=>{
+  try{
+    await Net.joinByCode({ code: $("#joinCode").value.trim(), password: $("#joinPassword").value });
+    flash($("#onlineFlash"), "Entrou pela chave");
+    showClientWait();
+  }catch(e){ alert(e.message || String(e)); }
+};
+$("#btnCreate").onclick = async ()=>{
+  try{
+    const name = $("#roomName").value.trim();
+    const teamSize = $("#roomTeams").value;
+    const preset = $("#roomPreset").value;
+    const password = $("#roomPassword").value;
+    const { code } = await Net.createRoom({ name, password, preset, teamSizeSel: teamSize });
+    $("#roomCodeLabel").textContent = code;
+    $("#hostPanel").classList.remove("hidden");
+    hideClientWait();
+    flash($("#onlineFlash"), `Sala criada: ${code}`);
+    await renderRooms();
+  }catch(e){ alert(e.message || String(e)); }
+};
+$("#btnCopyCode").onclick = async ()=>{
+  const code = $("#roomCodeLabel").textContent.trim();
+  if (!code) return;
+  await navigator.clipboard.writeText(code);
+  flash($("#onlineFlash"), "Código copiado");
+};
+$("#btnAutoBalance").onclick = ()=> Net.autoBalance();
+$("#btnStart").onclick = ()=> Net.startMatch();
+$("#btnCloseRoom").onclick = ()=> Net.closeRoom();
 
-  <script src="game.js" defer></script>
-</body>
-</html>
+// DnD para times
+["teamA","teamB"].forEach(id=>{
+  const ul = $("#"+id);
+  ul.addEventListener("dragover", e => { e.preventDefault(); ul.classList.add("dragover"); });
+  ul.addEventListener("dragleave", () => ul.classList.remove("dragover"));
+  ul.addEventListener("drop", e=>{
+    e.preventDefault(); ul.classList.remove("dragover");
+    const clientId = e.dataTransfer.getData("text/plain");
+    Net.setTeam(clientId, id==="teamA" ? "A" : "B");
+  });
+});
+
+// Carregar lista ao abrir modal
+const observer = new MutationObserver(() => {
+  if (onlineModal.dataset.open === "1") renderRooms();
+});
+observer.observe(onlineModal, { attributes:true, attributeFilter:["data-open"] });
+
+// ====== GANCHOS COM O MOTOR (game.js) ======
+// O game.js vai expor as funções (veja Patch 2 abaixo).
+window.KHNet = {
+  // cliente -> host
+  sendInput: (data)=> Net.sendInput(data),
+
+  // host (ao clicar Iniciar)
+  onHostStart: (payload)=>{
+    try { window.netHostStart?.(payload); } catch (e) { console.warn("netHostStart indisponível", e); }
+  },
+
+  // host recebe input de clientes
+  onClientInput: (clientId, data)=>{
+    try { window.netHostHandleInput?.(clientId, data); } catch (e) { console.warn("netHostHandleInput indisponível", e); }
+  },
+
+  // cliente recebe “start” do host
+  onClientStart: (payload)=>{
+    try { window.netClientStart?.(payload); } catch (e) { console.warn("netClientStart indisponível", e); }
+  },
+
+  // cliente recebe snapshots
+  onClientSnapshot: (state)=>{
+    try { window.netClientApplySnapshot?.(state); } catch (e) { /* silencioso */ }
+  },
+
+  // host transmite snapshot ~20Hz (o game chama isso)
+  __hostBroadcastSnapshot: (state)=> Net.broadcastSnapshot(state)
+};
+
+// Salva resultado ao final da partida (listener que você já tinha)
+addEventListener('shb:matchEnd', async (ev) => {
+  try {
+    const { db, addDoc, collection, serverTimestamp } = window.__firebase || {};
+    if (!db) return; // sem firebase ok
+    const data = { ...ev.detail, ts: serverTimestamp() };
+    await addDoc(collection(db, 'matches'), data);
+    console.log('Match salva!', data);
+  } catch (err) {
+    console.error('Falha ao salvar match:', err);
+  }
+});
+</script>
