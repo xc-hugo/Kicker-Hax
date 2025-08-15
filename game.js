@@ -1,4 +1,4 @@
-/* ===== Super Haxball+ – game.js
+/* ===== Kicker Hax – game.js
    ARQUIVO COMPLETO (sem resumo)
    Atualização desta versão:
    • Remapeamento:
