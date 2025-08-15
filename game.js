@@ -1,23 +1,18 @@
 /* ===== Super Haxball+ – game.js
    ARQUIVO COMPLETO (sem resumo)
    Atualização desta versão:
-   • “Desarme” agora congela totalmente o jogador atingido:
-     - Velocidade zera no momento do acerto.
-     - Enquanto estiver atordoado (stun > 0) ele não anda, não chuta, não dribla e não desarma.
-   • Replay:
-     - Efeito “stun” desenhado com BORDA PRETA (não mais vermelha).
-     - Prefixo de arquivo alterado para “Kicker Hax - Replay - …”.
-   • Mantidas as últimas melhorias:
-     - Replay mostra halos/efeitos (drible invuln, desarme/stun, halo preto de chute/power).
-     - Colisões com as traves (sem teleporte) e “boca” aberta.
-     - MP4 com áudio do jogo quando suportado (H.264 + AAC).
-     - Countdown pós-gol não congela o loop.
-     - F11/Esc/botões de tela cheia sincronizados.
-     - “Gol de …” centralizado no meio da barra.
-     - Chute por SOLTAR tecla, consome stamina e exige stamina suficiente.
-     - Personalização (2 chars ou 1 emoji). Nome/tempo/campos com texto branco.
-     - Removida “barrinha branca” (indicador de direção).
-     - Desarme com alcance ampliado.
+   • Remapeamento:
+       - Para “cancelar/deselecionar” uma célula em modo “Pressione…”, basta
+         clicar em QUALQUER área do menu que não seja um botão.
+       - Se você escolher uma tecla já usada pelo MESMO jogador, os dois
+         comandos trocam entre si (swap). Se a tecla estiver em uso pelo outro
+         jogador, é bloqueado (aviso).
+       - BACKSPACE durante o remapeamento limpa o comando selecionado.
+       - Não é possível iniciar a partida enquanto existirem comandos não
+         mapeados (no Solo só o P1 é exigido; no Versus, P1 e P2).
+   • Power Shoot continua funcionando em diagonais (mantido).
+   • IA: perto do gol/trave, a CPU evita “entrar com a bola” e prioriza chute
+     rápido; se errar, tenta novo chute ao invés de conduzir para dentro.
 ====================================================================== */
 
 (()=>{
@@ -75,11 +70,11 @@ const btnSolo=qs('#btnSolo'); const btnVersus=qs('#btnVersus');
 const btnClose=qs('#btnClose'); const btnResetMaps=qs('#btnResetMaps');
 const btnFullscreen2=qs('#btnFullscreen2');
 const nameP1=qs('#nameP1'), nameP2=qs('#nameP2');
-const badgeP1=qs('#badgeP1'), badgeP2=qs('#badgeP2'); // OPCIONAIS – se existirem no HTML
+const badgeP1=qs('#badgeP1'), badgeP2=qs('#badgeP2');
 const mapGrid=qs('#mapGridP1');
 const replayBar=qs('#replayBar'); const btnSkipReplay=qs('#btnSkipReplay'); const btnSaveReplay=qs('#btnSaveReplay');
 const pausedBadge=qs('#pausedBadge');
-const sizeSmall=qs('#sizeSmall'), sizeMedium=qs('#sizeMedium'), sizeLarge=qs('#sizeLarge'); // (fix: sem ']')
+const sizeSmall=qs('#sizeSmall'), sizeMedium=qs('#sizeMedium'), sizeLarge=qs('#sizeLarge');
 const sizeLabel=qs('#sizeLabel');
 const timeMinus=qs('#timeMinus'), timePlus=qs('#timePlus'), timeMinutes=qs('#timeMinutes');
 const needsRestartNote=qs('#needsRestartNote');
@@ -184,7 +179,7 @@ btnFullscreen2 && (btnFullscreen2.onclick = toggleFullscreen);
 document.addEventListener('fullscreenchange', applyFullscreenLikeState);
 window.addEventListener('resize', applyFullscreenLikeState);
 
-// Teclas
+// Teclas diretas para FS
 window.addEventListener('keydown', async (e)=>{
   const k=(e.key||'').toLowerCase();
   if(k==='escape'){
@@ -200,57 +195,176 @@ window.addEventListener('keydown', async (e)=>{
 const keys=new Map(); const codes=new Map();
 const inForm=el=>!!(el && (el.closest('input,textarea') || el.isContentEditable));
 let waitingRemap=null;
-function cancelRemap(){ if(waitingRemap){ waitingRemap.btn.style.outline=''; waitingRemap.btn.textContent=waitingRemap.prev || '—'; waitingRemap=null; renderMapping(); } }
 
+/* Limpar TUDO (corrige “andar sozinho”) */
+function clearAllInputs(){
+  keys.clear(); codes.clear();
+  players.forEach(p=>{ p.kickCharge=0; });
+}
+
+/* Cancelar remapeamento (UI) — sem reconstruir a grade */
+function cancelRemap(){ 
+  if(waitingRemap){ 
+    const {btn, prev} = waitingRemap;
+    if(btn){ btn.style.outline=''; btn.textContent = (prev || btn.textContent || '—'); }
+    waitingRemap=null; 
+  } 
+}
+
+/* Clique em QUALQUER área do menu (fora de botões) cancela remapeamento */
+if(menu){
+  menu.addEventListener('mousedown', (e)=>{
+    if(!waitingRemap) return;
+    if(e.target.closest('button')) return; // botões não cancelam
+    cancelRemap();
+  });
+  menu.addEventListener('touchstart', (e)=>{
+    if(!waitingRemap) return;
+    if(e.target.closest('button')) return;
+    cancelRemap();
+  }, {passive:true});
+}
+
+/* Clique fora da grade também cancela (fallback) */
+function clickOutsideCancels(e){
+  if(!waitingRemap) return;
+  const grid = mapGrid;
+  if(!grid) return;
+  if(!grid.contains(e.target)){
+    cancelRemap();
+  }
+}
+document.addEventListener('mousedown', clickOutsideCancels);
+document.addEventListener('touchstart', clickOutsideCancels, {passive:true});
+
+/* Utilidades de remapeamento */
+function keyInPlayer(tgt, key){
+  if(!key) return null;
+  const list=['up','down','left','right','shoot','dribble','tackle'];
+  for(const id of list){ if(tgt[id]===key) return {act:id,type:'key'}; }
+  if(tgt.power===key) return {act:'power',type:'keycode'};
+  return null;
+}
+function codeInPlayer(tgt, code){
+  if(!code) return null;
+  if(tgt.sprintCode===code) return {act:'sprint',type:'code'};
+  if(tgt.powerCode===code) return {act:'power',type:'keycode'};
+  return null;
+}
+function usedByOtherPlayerKey(who, key){
+  const other = (who==='p1')? CTRL_P2 : CTRL_P1;
+  if(!key) return false;
+  const all=[other.up,other.down,other.left,other.right,other.shoot,other.dribble,other.tackle,other.power];
+  return all.includes(key);
+}
+function usedByOtherPlayerCode(who, code){
+  const other = (who==='p1')? CTRL_P2 : CTRL_P1;
+  if(!code) return false;
+  return other.sprintCode===code || other.powerCode===code;
+}
+
+/* Iniciar remapeamento — cancela o anterior sem re-render */
+function beginRemap(who, act, type, btn){
+  if(waitingRemap && waitingRemap.btn!==btn){
+    const {btn:prevBtn, prev:prevText} = waitingRemap;
+    if(prevBtn){ prevBtn.style.outline=''; prevBtn.textContent = prevText; }
+    waitingRemap=null;
+  }
+  waitingRemap={who,act,type,btn,prev:btn.textContent};
+  btn.textContent='Pressione...'; 
+  btn.style.outline='2px solid var(--accent)';
+}
+
+/* Eventos de teclado globais */
 addEventListener('keydown', e=>{
   const k=(e.key||'').toLowerCase();
+
+  // BACKSPACE limpa o comando selecionado
+  if(waitingRemap && k==='backspace'){
+    e.preventDefault(); e.stopPropagation();
+    const {who,act,type,btn}=waitingRemap;
+    const tgt = (who==='p1')? CTRL_P1 : CTRL_P2;
+    if(type==='key'){
+      tgt[act]='';
+    }else if(type==='code'){
+      tgt.sprintCode=null;
+    }else{ // keycode (power)
+      tgt.power=''; tgt.powerCode=null;
+    }
+    waitingRemap=null; renderMapping(); refreshDirty(); updateBlocks(); return;
+  }
+
   if(k==='escape'){ if(waitingRemap){ e.preventDefault(); cancelRemap(); return; } }
+
   if(waitingRemap){
     e.preventDefault(); e.stopPropagation();
     const {who,act,type,btn}=waitingRemap;
     const tgt = (who==='p1')?CTRL_P1:CTRL_P2;
     const other = (who==='p1')?CTRL_P2:CTRL_P1;
-    const keysOf=C=>[C.up,C.down,C.left,C.right,C.shoot,C.dribble,C.tackle,C.power].filter(Boolean);
-    const codesOf=C=>[C.sprintCode,C.powerCode].filter(Boolean);
     const newKey=(e.key||'').toLowerCase(), newCode=e.code||null;
-    let conflict=false;
-    if(type==='code'){
-      if(codesOf(tgt).includes(newCode) && newCode!==tgt.sprintCode) conflict=true;
-      if(codesOf(other).includes(newCode)) conflict=true;
-    } else if(type==='key'){
-      if(keysOf(tgt).includes(newKey) && newKey!==tgt[act]) conflict=true;
-      if(keysOf(other).includes(newKey)) conflict=true;
-    } else {
-      const sameSelf = (newKey===tgt.power && newCode===tgt.powerCode);
-      if(!sameSelf){
-        if(keysOf(tgt).includes(newKey) || codesOf(tgt).includes(newCode)) conflict=true;
-        if(keysOf(other).includes(newKey) || codesOf(other).includes(newCode)) conflict=true;
+
+    // Bloqueio cruzado: não permitir usar tecla/código do OUTRO jogador
+    if(type!=='code' && usedByOtherPlayerKey(who,newKey)){ btn.classList.add('warn'); const old=btn.textContent; btn.textContent='Em uso (P adversário)'; setTimeout(()=>{btn.classList.remove('warn'); btn.textContent=old;},900); return; }
+    if((type==='code' || type==='keycode') && usedByOtherPlayerCode(who,newCode)){ btn.classList.add('warn'); const old=btn.textContent; btn.textContent='Em uso (P adversário)'; setTimeout(()=>{btn.classList.remove('warn'); btn.textContent=old;},900); return; }
+
+    // SWAP dentro do MESMO jogador
+    if(type==='key'){
+      const otherHit = keyInPlayer(tgt, newKey);
+      const prevKey = tgt[act];
+      if(otherHit && !(otherHit.act===act && otherHit.type==='key')){
+        // efetua troca
+        if(otherHit.act==='power'){
+          const pk = tgt.power; tgt.power = prevKey; tgt[act]=newKey;
+        }else{
+          const tmp = tgt[otherHit.act]; tgt[otherHit.act]=prevKey; tgt[act]=newKey;
+        }
+      }else{
+        tgt[act]=newKey;
+      }
+    }else if(type==='code'){ // sprintCode
+      const otherHit = codeInPlayer(tgt, newCode);
+      const prev = tgt.sprintCode;
+      if(otherHit && !(otherHit.act==='sprint' && otherHit.type==='code')){
+        if(otherHit.act==='power'){ const tmp=tgt.powerCode; tgt.powerCode=prev; tgt.sprintCode=newCode; }
+      }else{
+        tgt.sprintCode=newCode;
+      }
+    }else{ // keycode -> power (troca tanto key quanto code se necessário)
+      // key
+      const otherKeyHit = keyInPlayer(tgt, newKey);
+      const prevKey = tgt.power;
+      if(otherKeyHit && !(otherKeyHit.act==='power')){
+        tgt.power=newKey;
+        if(otherKeyHit.type==='key') tgt[otherKeyHit.act]=prevKey;
+      }else{
+        tgt.power=newKey;
+      }
+      // code
+      const otherCodeHit = codeInPlayer(tgt, newCode);
+      const prevCode = tgt.powerCode;
+      if(otherCodeHit && !(otherCodeHit.act==='power')){
+        tgt.powerCode=newCode;
+        if(otherCodeHit.type==='code') tgt.sprintCode=prevCode;
+      }else{
+        tgt.powerCode=newCode;
       }
     }
-    if(conflict){ btn.classList.add('warn'); const old=btn.textContent; btn.textContent='Em uso'; setTimeout(()=>{btn.classList.remove('warn'); btn.textContent=old;},800); return; }
-    if(who==='p1'){
-      if(type==='code'){ CTRL_P1.sprintCode=newCode||null; }
-      else if(type==='keycode'){ CTRL_P1.power=newKey; CTRL_P1.powerCode=newCode||null; }
-      else { CTRL_P1[act]=newKey; }
-    }else{
-      if(type==='code'){ CTRL_P2.sprintCode=newCode||null; }
-      else if(type==='keycode'){ CTRL_P2.power=newKey; CTRL_P2.powerCode=newCode||null; }
-      else { CTRL_P2[act]=newKey; }
-    }
+
     waitingRemap=null; renderMapping(); refreshDirty(); updateBlocks(); return;
   }
+
   if(inForm(e.target)) return;
-  if((e.ctrlKey||e.metaKey) && k==='l'){ e.preventDefault(); e.stopPropagation(); return; }
+  if((e.ctrlKey||e.metaKey) && k==='l'){ e.preventDefault(); e.stopPropagation(); return; } // evita ir pra barra URL
   if(['arrowup','arrowdown','arrowleft','arrowright',' ','enter','1','2','3'].includes(k)) e.preventDefault();
   keys.set(k,true); codes.set(e.code,true);
 },{passive:false});
 
-/* === Detectar “soltar chute” (release-to-shoot) === */
 addEventListener('keyup', e=>{
   if(inForm(e.target)) return;
   const k=(e.key||'').toLowerCase(); const c=e.code;
   keys.set(k,false); codes.set(c,false);
 
+  // Dispara o chute APENAS quando soltar a tecla configurada
   const tryRelease=(p,ctrl)=>{
     if(!p || p.cpu) return;
     const isShoot = (ctrl.shoot && k===ctrl.shoot) || (ctrl.shootCode && c===ctrl.shootCode);
@@ -260,26 +374,34 @@ addEventListener('keyup', e=>{
   tryRelease(p2, CTRL_P2);
 });
 
+/* Se a janela perder o foco / mudar visibilidade, limpa entradas (corrige “andar sozinho”) */
+window.addEventListener('blur', clearAllInputs);
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) clearAllInputs(); });
+
 /* ===== Render helpers ===== */
 function keyLabel(k,c){
   if(c==='ShiftLeft') return 'Shift Esq.';
   if(c==='ShiftRight') return 'Shift Dir.';
   const map={' ':'Espaço','arrowup':'↑','arrowdown':'↓','arrowleft':'←','arrowright':'→','enter':'Enter'};
-  return map[k]?.toUpperCase?.() || (k? k.toUpperCase(): (c||''));
+  const str = map[k]?.toUpperCase?.() || (k? k.toUpperCase(): (c||''));
+  return str || '—';
 }
 function renderMapping(){
   if(!mapGrid) return;
   mapGrid.innerHTML = `<div class="hdr">Ação</div><div class="hdr">P1</div><div class="hdr">P2</div>`;
   actions.forEach(a=>{
     const l=document.createElement('div'); l.textContent=a.label; mapGrid.appendChild(l);
+
     const b1=document.createElement('button'); b1.className='mapbtn btn';
     b1.textContent = a.type==='code' ? keyLabel('', CTRL_P1.sprintCode) : (a.id==='power' ? keyLabel(CTRL_P1.power,CTRL_P1.powerCode) : keyLabel(CTRL_P1[a.id],null));
-    b1.onclick = ()=>{ waitingRemap={who:'p1',act:a.id,type:a.type,btn:b1,prev:b1.textContent}; b1.textContent='Pressione...'; b1.style.outline='2px solid var(--accent)'; };
+    b1.onclick = ()=> beginRemap('p1', a.id, a.type, b1);
     mapGrid.appendChild(b1);
+
     const b2=document.createElement('button'); b2.className='mapbtn btn';
     b2.textContent = a.type==='code' ? keyLabel('', CTRL_P2.sprintCode) : (a.id==='power' ? keyLabel(CTRL_P2.power,CTRL_P2.powerCode) : keyLabel(CTRL_P2[a.id],null));
-    b2.onclick = ()=>{ waitingRemap={who:'p2',act:a.id,type:a.type,btn:b2,prev:b2.textContent}; b2.textContent='Pressione...'; b2.style.outline='2px solid var(--accent)'; };
+    b2.onclick = ()=> beginRemap('p2', a.id, a.type, b2);
     mapGrid.appendChild(b2);
+
     attachRipple(b1); attachRipple(b2);
   });
   renderHelpTips();
@@ -303,7 +425,6 @@ const KICK_CHARGE=6.0;
 
 /* ===== Desarme — alcance facilitado ===== */
 const STAMINA_LOCK_FRAMES=90, REGEN_IDLE=0.0022, DRAIN_SPRINT=0.0060;
-/* alcance ↑ de 56 para 82 e mergulho ↑ */
 const TACKLE_RANGE=82, TACKLE_CD=140, TACKLE_LUNGE=9.0, TACKLE_STUN=120, TACKLE_SLOW_TIME=80, FAIL_STUN=30;
 const TACKLE_STAM_COST=1/3, DRIBBLE_DASH=3.8,DRIBBLE_TIME=12,DRIBBLE_CD=34,DRIBBLE_INVULN=12, DRIBBLE_STAM_COST=1/3;
 const POWER_KICK_POWER=22.0, POWER_KICK_CD=60;
@@ -312,12 +433,25 @@ const POWER_KICK_POWER=22.0, POWER_KICK_CD=60;
 let versusSelected=null; 
 let versus=false,gameStarted=false, paused=true, autoPaused=false, menuOpen=true;
 let baseMinutes=3,matchTime=baseMinutes*60,score={red:0,blue:0};
-let inCountdown=false, goalCooldown=0, justScored=false, lastScorer='', lastOwnGoal=false, countdownPaused=false;
+let inCountdown=false, goalCooldown=0, justScored=false, lastScorer='', lastOwnGoal=false;
 const REPLAY_FRAMES_MAX=240;
 let replayBufArr=new Array(REPLAY_FRAMES_MAX),bufIdx=0;
 let replayQueue=null,replayIdx=0,inReplay=false,replayTimer=0,replayPaused=false;
 let startReplayPending=false;
 let lastGoalSide=''; // 'blue' ou 'red'
+
+/* Congelamento pós-gol (2s) antes do replay */
+const GOAL_FREEZE_FRAMES = 120;
+let goalFreeze = 0;
+
+/* Fim de jogo: congelamento de 3s antes do menu */
+const END_FREEZE_FRAMES = 180;
+let endFreeze = 0;
+let matchEnded=false;
+
+/* Pós-jogo exige Reiniciar */
+let endMatchLock=false; 
+let postMatchMenuShown=false;
 
 /* ===== “Alterações pendentes” ===== */
 let appliedState = {mode:null, minutes:3, size:{w:1024,h:640}, names:{p1:'P1',p2:'P2'}, badges:{p1:'',p2:''}};
@@ -395,7 +529,6 @@ function collidePlayerWithCorner(p, cx, cy, cr){
     const nx=dx/d, ny=dy/d;
     const overlap=minDist-d;
     p.x+=nx*overlap; p.y+=ny*overlap;
-    // amortecimento leve pra não “grudar”
     const vDot=p.vx*nx+p.vy*ny;
     p.vx -= 0.8*vDot*nx;
     p.vy -= 0.8*vDot*ny;
@@ -539,7 +672,7 @@ class Player extends Body{
     else { this.stamina=clamp(this.stamina + regen, 0, 1); }
   }
   inputHuman(ctrl){
-    if(this.stun>0){ this.kickCharge=0; return; } // congelado: sem input
+    if(this.stun>0){ this.kickCharge=0; return; } // congelado
     const c=ctrl; let ax=0,ay=0; if(keys.get(c.up)) ay-=1; if(keys.get(c.down)) ay+=1; if(keys.get(c.left)) ax-=1; if(keys.get(c.right)) ax+=1;
     const sprintPressed=(c.sprintCode? (codes.get(c.sprintCode)?1:0) : (keys.get(c.sprintKey)?1:0));
     const canSprint = sprintPressed && this.staminaLock<=0 && this.stamina>0;
@@ -554,10 +687,11 @@ class Player extends Body{
     const shootHeld = keys.get(c.shoot) || (c.shootCode && codes.get(c.shootCode));
     if(shootHeld){ this.kickCharge = Math.min(1, this.kickCharge + 0.065); } else { this.kickCharge *= 0.95; }
 
-    // POWER
+    // POWER (usa vetor das teclas para permitir diagonais)
     const wantPower = (keys.get(c.power) || (c.powerCode && codes.get(c.powerCode)));
-    if(wantPower && this.power_cd<=0 && (ball.owner===this || touchBall(this,ball)) && this.stun<=0 && this.stamina>=0.999 && this.staminaLock<=0){
-      powerKick(this); sfx('power'); this.forceZeroAndLock(); this.aiShootLock=160; this.shootHalo=22;
+    if(wantPower && this.power_cd<=0 && (ball.owner===this || touchBall(this,ball)) && this.stun<=0 && this.stamina>=0.98 && this.staminaLock<=0){
+      const aim = getAimAngleFromHeld(c, this);
+      powerKick(this, aim); sfx('power'); this.forceZeroAndLock(); this.aiShootLock=160; this.shootHalo=22;
     }
 
     // DRIBLE
@@ -576,9 +710,10 @@ class Player extends Body{
     }
   }
   inputCPU(){
-    if(this.stun>0){ this.vx=0; this.vy=0; return; } // congelado: sem mover
+    if(this.stun>0){ this.vx=0; this.vy=0; return; } // congelado
     const ours=this.team===Team.RED?redTeam:blueTeam, their=this.team===Team.RED?blueTeam:redTeam;
     const goalX = (this.team===Team.RED? W-BORDER-POST_T-2 : BORDER+POST_T+2);
+    const gTop=(H-GOAL_W)/2, gBot=(H+GOAL_W)/2;
     const ballFuture = predictBall(ball, 10);
     const distBall = Math.hypot(ballFuture.x-this.x, ballFuture.y-this.y);
     const closest=closestPlayerTo(ballFuture,ours);
@@ -614,10 +749,22 @@ class Player extends Body{
     const nearestOpp = theirTeam.reduce((b,e)=> (Math.hypot(e.x-this.x,e.y-this.y) < (b?Math.hypot(b.x-this.x,b.y-this.y):1e9) ? e : b), null);
     const oppDist = nearestOpp? Math.hypot(nearestOpp.x-this.x, nearestOpp.y-this.y) : 1e9;
     const oppFront = nearestOpp? Math.cos(nA(Math.atan2(nearestOpp.y-this.y, nearestOpp.x-this.x) - (this.dir||0))) : -1;
-    const pressure = oppDist<90 && oppFront>0; 
+    const pressure = oppDist<90 && oppFront>0.2; 
     const distToGoal = Math.abs(goalX-this.x);
+    const mouth = (this.y>gTop && this.y<gBot);
 
     if(haveBall){
+      // NOVO: Se muito perto do gol ou na "boca", prioriza chute rápido (evita entrar com a bola)
+      if(distToGoal < 100){
+        const gx = goalX;
+        const gy = clamp(this.y, gTop+20, gBot-20);
+        const quick=clearShotToGoal(this);
+        const aim = quick.ok ? quick.dir : Math.atan2(gy-ball.y, gx-ball.x);
+        const pow = Math.max(3.0, KICK_BASE + KICK_CHARGE*0.55);
+        kickBall(this, aim, pow); sfx('kick'); this.cool=20; this.aiShootLock=140; this.spendStaminaFrac(0.22); this.shootHalo=18;
+        return;
+      }
+
       const shot=clearShotToGoal(this);
       const nearGoal = distToGoal < 140;
       const clearLane = shot.ok && shot.score > 1.20;
@@ -648,7 +795,6 @@ class Player extends Body{
         if(this.power_cd<=0 && this.aiShootLock<=0 && this.stamina>=0.999 && midDist && shot2.ok && shot2.score>1.45){
           powerKick(this); sfx('power'); this.forceZeroAndLock(); this.aiShootLock=160; this.shootHalo=22;
         }
-        const gTop=(H-GOAL_W)/2, gBot=(H+GOAL_W)/2;
         const gy = clamp(this.y + (nearestOpp? ((this.y<nearestOpp.y)? -36: 36):0), gTop+24, gBot-24);
         steer(goalX, gy, 1.0);
       }
@@ -673,7 +819,6 @@ class Player extends Body{
     // Jogador atordoado (stun): completamente congelado
     if(this.stun>0){
       this.vx=0; this.vy=0;
-      // timers ainda contam:
       if(this.tackle_cd>0)this.tackle_cd--;
       if(this.dribble_cd>0)this.dribble_cd--;
       if(this.dash_time>0)this.dash_time--;
@@ -707,11 +852,9 @@ class Player extends Body{
     // 2) Dentro da boca (entre gTop e gBot): livre atravessar o plano da trave,
     //    mas respeitando fundo e teto/base da rede, e colidir com as QUINAS.
     if(ny>gTop && ny<gBot){
-      // Fundo da rede esquerda/direita
       if(nx - this.r < leftNetBack){ nx = leftNetBack + this.r; this.vx = Math.max(this.vx, 0)*0.5; }
       if(nx + this.r > rightNetBack){ nx = rightNetBack - this.r; this.vx = Math.min(this.vx, 0)*0.5; }
 
-      // Teto/base da rede (somente quando “dentro” dos túneis da rede)
       const inLeft = nx < BORDER && nx >= leftNetBack - 6;
       const inRight= nx > W-BORDER && nx <= rightNetBack + 6;
       if(inLeft || inRight){
@@ -719,7 +862,6 @@ class Player extends Body{
         if(ny + this.r > gBot){ ny=gBot - this.r; this.vy = Math.min(this.vy,0)*0.4; }
       }
 
-      // Colisão com os cantos das traves (evita atravessar a parede ao cruzar gTop/gBot)
       const tmp={x:nx,y:ny,vx:this.vx,vy:this.vy,r:this.r};
       collidePlayerWithCorner(tmp, leftPostX, gTop, cornerR);
       collidePlayerWithCorner(tmp, leftPostX, gBot, cornerR);
@@ -727,11 +869,9 @@ class Player extends Body{
       collidePlayerWithCorner(tmp, rightPostX, gBot, cornerR);
       nx=tmp.x; ny=tmp.y; this.vx=tmp.vx; this.vy=tmp.vy;
     } else {
-      // 3) Fora da boca: paredes laterais do campo
       if(nx - this.r < BORDER){ nx=BORDER+this.r; this.vx*=-0.5; }
       if(nx + this.r > W-BORDER){ nx=W-BORDER-this.r; this.vx*=-0.5; }
 
-      // Colidir com cantos ao tentar “raspar” na boca
       const tmp={x:nx,y:ny,vx:this.vx,vy:this.vy,r:this.r};
       collidePlayerWithCorner(tmp, leftPostX, gTop, cornerR);
       collidePlayerWithCorner(tmp, leftPostX, gBot, cornerR);
@@ -740,10 +880,8 @@ class Player extends Body{
       nx=tmp.x; ny=tmp.y; this.vx=tmp.vx; this.vy=tmp.vy;
     }
 
-    // Aplicar posição ajustada
     this.x = nx; this.y = ny;
 
-    // Timers
     if(this.tackle_cd>0)this.tackle_cd--;
     if(this.dribble_cd>0)this.dribble_cd--;
     if(this.dash_time>0)this.dash_time--;
@@ -770,16 +908,31 @@ class Player extends Body{
     }
     if(this.badge){
       ctx.fillStyle='#0b1020';
-      ctx.font='700 16px system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+      const g=segmentGraphemes(this.badge);
+      const fontSize = (g.length>=2 && !isEmojiCluster(g[0])) ? 14 : 16;
+      ctx.font=`700 ${fontSize}px system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
       ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillText(this.badge, this.x, this.y);
     }
     if(this.invuln>0){ ctx.strokeStyle='#22c55e'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.arc(this.x,this.y,this.r+4,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
-    // sem “barrinha branca” (indicador removido)
+    // indicador simples de posse (triângulo), sem “barrinha”
     if(ball.owner===this){ ctx.fillStyle='rgba(255,255,255,.85)'; ctx.beginPath(); ctx.moveTo(this.x,this.y-PLAYER_RADIUS-10); ctx.lineTo(this.x-6,this.y-PLAYER_RADIUS-2); ctx.lineTo(this.x+6,this.y-PLAYER_RADIUS-2); ctx.closePath(); ctx.fill(); }
     if(this.stun>0){ ctx.strokeStyle='#ef4444'; ctx.beginPath(); ctx.arc(this.x,this.y,this.r+2,0,Math.PI*2); ctx.stroke(); }
     if(this.name){ ctx.fillStyle='#e2e8f0'; ctx.font='12px system-ui'; ctx.textAlign='center'; ctx.fillText(this.name,this.x,this.y-PLAYER_RADIUS-16); }
   }
+}
+
+/* ===== Aim helper (para power e, opcionalmente, chute) ===== */
+function getAimAngleFromHeld(ctrl, p){
+  if(!ctrl) ctrl = p?.controls || null;
+  if(!ctrl) return p?.dir || 0;
+  let ax=0, ay=0;
+  if(keys.get(ctrl.up)) ay-=1;
+  if(keys.get(ctrl.down)) ay+=1;
+  if(keys.get(ctrl.left)) ax-=1;
+  if(keys.get(ctrl.right)) ax+=1;
+  if(ax===0 && ay===0) return p?.dir || 0;
+  return Math.atan2(ay, ax);
 }
 
 /* ===== Mundo/colisões ===== */
@@ -802,7 +955,7 @@ function playerBallCollisions(){ for(const p of players){ const c=circleCollisio
 }}
 function touchBall(p,b){ return Math.hypot(p.x-b.x,p.y-b.y) < p.r+b.r+8; }
 function kickBall(p,ang,pow){ const px=Math.cos(ang||0),py=Math.sin(ang||0); ball.owner=null; ball.noPickupFrames=14; ball.noPickupFrom=p; ball.vx+=px*pow; ball.vy+=py*pow; ball.vx+=rnd(-0.05,0.05); ball.vy+=rnd(-0.05,0.05); ball.lastTouch=p; ball.markStrike('kick'); }
-function powerKick(p){ if(!(ball.owner===p || touchBall(p,ball))) return; const ang=p.dir||0; kickBall(p,ang,POWER_KICK_POWER); p.power_cd=POWER_KICK_CD; p.cool=12; p.kickCharge=0; ball.markStrike('power'); }
+function powerKick(p, angleOverride){ if(!(ball.owner===p || touchBall(p,ball))) return; const ang=(typeof angleOverride==='number')? angleOverride : (p.dir||0); kickBall(p,ang,POWER_KICK_POWER); p.power_cd=POWER_KICK_CD; p.cool=12; p.kickCharge=0; ball.markStrike('power'); }
 
 /* ===== Buffer de Replay (frames + SFX) ===== */
 let currentFrameSfx=[];
@@ -812,9 +965,9 @@ function recordFrame(){
     has:(ball.owner===p),
     name:p.name||'',
     badge:p.badge||'',
-    inv:p.invuln||0,       // <<< INVULN para drible
-    stun:p.stun||0,        // <<< STUN (vai ser preto no replay)
-    halo:p.shootHalo||0    // <<< HALO preto para chute/power
+    inv:p.invuln||0,       // drible (verde)
+    stun:p.stun||0,        // atordoado (preto no replay)
+    halo:p.shootHalo||0    // halo preto (chute/power)
   }));
   const frame={ball:{x:ball.x,y:ball.y},players:snap,score:{...score}, sfx: currentFrameSfx.slice()};
   replayBufArr[bufIdx]=frame; bufIdx=(bufIdx+1)%REPLAY_FRAMES_MAX;
@@ -836,7 +989,9 @@ function playerShootOnRelease(p){
     return;
   }
 
-  const dir = p.dir || 0;
+  const aim = getAimAngleFromHeld(p.controls, p);
+  const dir = aim ?? (p.dir || 0);
+
   kickBall(p, dir, pow); sfx('kick'); p.cool=14; p.kickCharge=0; p.aiShootLock=120;
   p.spendStaminaFrac(costFrac);
   p.shootHalo=18;
@@ -856,7 +1011,7 @@ function attemptTackle(p){
   if(tgt && Math.hypot(tgt.x-p.x,tgt.y-p.y) <= TACKLE_RANGE && tgt.invuln<=0 && ball.owner===tgt){
     ball.forcePickup(p);
     tgt.stun = Math.max(tgt.stun, TACKLE_STUN);
-    tgt.vx = 0; tgt.vy = 0; // CONGELA imediatamente ao ser desarmado
+    tgt.vx = 0; tgt.vy = 0; // congela
     p.tackleSuccess = true;
   }
 }
@@ -914,34 +1069,29 @@ function renderReplayFrameTo(cx,f,withCaption){
   cx.fillStyle=g; cx.beginPath(); cx.arc(f.ball.x,f.ball.y,BALL_RADIUS,0,Math.PI*2); cx.fill();
   // players
   for(const p of f.players){
-    // base e sombra
     cx.fillStyle='rgba(0,0,0,.25)'; cx.beginPath(); cx.ellipse(p.x+4,p.y+8,PLAYER_RADIUS*1.1,PLAYER_RADIUS*0.6,0,0,Math.PI*2); cx.fill();
     cx.beginPath(); cx.arc(p.x,p.y,PLAYER_RADIUS,0,Math.PI*2); cx.fillStyle=(p.team===0?'#ef4444':'#60a5fa'); cx.fill(); cx.lineWidth=2; cx.strokeStyle='rgba(0,0,0,.45)'; cx.stroke();
 
-    // EFEITOS DE BORDA NO REPLAY:
-    // 1) Halo de chute/power
     if((p.halo||0)>0){
       cx.strokeStyle='#000000';
       cx.lineWidth=2;
       cx.beginPath(); cx.arc(p.x,p.y,PLAYER_RADIUS+2,0,Math.PI*2); cx.stroke();
     }
-    // 2) Invulnerabilidade (drible)
     if((p.inv||0)>0){
       cx.strokeStyle='#22c55e';
       cx.setLineDash([4,4]);
       cx.beginPath(); cx.arc(p.x,p.y,PLAYER_RADIUS+4,0,Math.PI*2); cx.stroke();
       cx.setLineDash([]);
     }
-    // 3) Atordoado (desarme sofrido) — PRETO no REPLAY
     if((p.stun||0)>0){
-      cx.strokeStyle='#000000';
+      cx.strokeStyle='#000000'; // PRETO no replay para stun
       cx.beginPath(); cx.arc(p.x,p.y,PLAYER_RADIUS+2,0,Math.PI*2); cx.stroke();
     }
 
-    // badge e nome
     if(p.badge){
       cx.fillStyle='#0b1020';
-      cx.font='700 16px system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+      const gseg=segmentGraphemes(p.badge); const fontSize=(gseg.length>=2 && !isEmojiCluster(gseg[0]))?14:16;
+      cx.font=`700 ${fontSize}px system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
       cx.textAlign='center'; cx.textBaseline='middle';
       cx.fillText(p.badge, p.x, p.y);
     }
@@ -956,17 +1106,178 @@ function renderReplayFrameTo(cx,f,withCaption){
     const boxW=420, boxH=30; const boxX = W/2 - boxW/2; const boxY = H - BORDER - boxH - 10;
     cx.fillStyle='rgba(2,6,23,.88)'; cx.fillRect(boxX, boxY, boxW, boxH);
     cx.strokeStyle='rgba(255,255,255,.12)'; cx.strokeRect(boxX+.5, boxY+.5, boxW-1, boxH-1);
-    // CENTRALIZAÇÃO EXATA
     cx.fillStyle='#e2e8f0'; cx.font='600 14px system-ui'; cx.textAlign='center'; cx.textBaseline='middle';
     cx.fillText(label, W/2, boxY + boxH/2);
   }
   drawNetOverlay(cx);
 }
+
+/* Cortar replay incluindo 2s APÓS o instante do gol (congelamento) */
 function trimReplayToGoal(list, side){
-  let lastIdx=-1;
-  for(let i=list.length-1;i>=0;i--){ if(frameBallFullyInside(list[i], side)){ lastIdx=i; break; } }
-  if(lastIdx>=0) return list.slice(0, lastIdx+1);
-  return list;
+  let idx=-1;
+  for(let i=list.length-1;i>=0;i--){ if(frameBallFullyInside(list[i], side)){ idx=i; break; } }
+  if(idx<0) return list;
+  const POST = GOAL_FREEZE_FRAMES; // incluir 2s após o gol
+  const end = Math.min(list.length, idx + POST + 1);
+  return list.slice(0, end);
+}
+
+/* ===== Recorder MP4 ===== */
+let liveRec=null, liveRecChunks=[], liveRecActive=false;
+let recSupported=true;
+let cancelRecOnStop=false;
+let pendingReplayBlob=null, pendingReplayMime='video/mp4';
+let postSaveBtn=null, postSaveTimer=null, downloadWhenReady=false, skipJustHappened=false;
+
+function formatNiceDate(d=new Date()){
+  const p2=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}-${p2(d.getMinutes())}-${p2(d.getSeconds())}`;
+}
+function pickStrictMp4Mime(){
+  const candidates=[
+    'video/mp4;codecs=avc1,mp4a',
+    'video/mp4;codecs=h264,aac',
+    'video/mp4'
+  ];
+  for(const m of candidates){
+    try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch{}
+  }
+  return '';
+}
+
+/* Pausar/retomar a gravação do replay quando o jogo/replay estiver pausado */
+function shouldRecorderBePaused(){
+  return inReplay && (menuOpen || autoPaused || replayPaused);
+}
+function updateRecorderPauseState(){
+  if(!recSupported || !liveRecActive || !liveRec) return;
+  const wantPause = shouldRecorderBePaused();
+  try{
+    if(wantPause && liveRec.state==='recording'){
+      if(typeof liveRec.pause==='function') liveRec.pause();
+    } else if(!wantPause && liveRec.state==='paused'){
+      if(typeof liveRec.resume==='function') liveRec.resume();
+    }
+  }catch{}
+}
+
+/* Iniciar gravação do replay (MP4) */
+function startLiveReplayRecording(){
+  try{
+    pendingReplayBlob=null; pendingReplayMime='video/mp4'; downloadWhenReady=false;
+    recSupported=true;
+    if(liveRecActive && liveRec){ cancelRecOnStop=true; try{liveRec.stop();}catch{} }
+
+    ensureBuses();
+    const fps=30;
+    const vStream = cvs.captureStream ? cvs.captureStream(fps) : null;
+    const aStream = recDest ? recDest.stream : null;
+    if(!vStream || !aStream){ flash('Replay: captura indisponível'); recSupported=false; return; }
+
+    const mime = pickStrictMp4Mime();
+    if(!mime){ recSupported=false; flash('Seu navegador não suporta gravação MP4 (H.264 + AAC).'); return; }
+
+    const stream = new MediaStream([ ...vStream.getVideoTracks(), ...aStream.getAudioTracks() ]);
+    liveRecChunks=[]; 
+    liveRec = new MediaRecorder(stream, {mimeType:mime, videoBitsPerSecond:3_200_000, audioBitsPerSecond:160_000});
+    pendingReplayMime = mime;
+
+    liveRec.ondataavailable = e=>{ if(e.data && e.data.size) liveRecChunks.push(e.data); };
+    liveRec.onstop = ()=>{
+      if(cancelRecOnStop){
+        cancelRecOnStop=false; liveRec=null; liveRecChunks=[]; liveRecActive=false; return;
+      }
+      const blob = new Blob(liveRecChunks, {type:pendingReplayMime});
+      pendingReplayBlob = blob;
+      liveRec=null; liveRecChunks=[]; liveRecActive=false;
+      if(downloadWhenReady){ doDownloadPendingBlob(); }
+    };
+    liveRec.start();
+    liveRecActive=true;
+
+    updateRecorderPauseState();
+    setTimeout(()=>sfx('goal'), 60); // o som ficará presente no replay
+  }catch(e){ console.error(e); flash('Replay: falha ao iniciar gravação'); recSupported=false; }
+}
+function stopLiveRec(offerSave){
+  try{
+    if(!recSupported) return;
+    if(!liveRecActive || !liveRec){
+      if(offerSave) showPostReplaySaveButton();
+      return;
+    }
+    try{
+      if(liveRec.state==='paused' && typeof liveRec.resume==='function') liveRec.resume();
+    }catch{}
+    if(!offerSave){
+      cancelRecOnStop=true;
+      liveRec.stop();
+      liveRecActive=false;
+      return;
+    }
+    liveRec.stop();
+    liveRecActive=false;
+    showPostReplaySaveButton();
+  }catch{}
+}
+
+/* Mostrar salvar por 6s ao lado direito do MENU (pulsando) */
+function showPostReplaySaveButton(){
+  if(!recSupported) return;
+  if(skipJustHappened) return;
+  removePostSaveButton();
+  const menuBtn = document.getElementById('openMenu');
+  const btn = document.createElement('button');
+  btn.id='postSaveReplay';
+  btn.className='btn pill pulse-btn';
+  btn.textContent='Salvar replay';
+  btn.style.marginLeft='8px';
+  btn.onclick = ()=>{ savePendingReplay(); };
+  attachRipple(btn);
+  if(menuBtn && menuBtn.parentElement){
+    if(menuBtn.nextSibling) menuBtn.parentElement.insertBefore(btn, menuBtn.nextSibling);
+    else menuBtn.parentElement.appendChild(btn);
+  } else {
+    topbar && topbar.appendChild(btn);
+  }
+  postSaveBtn=btn;
+  clearTimeout(postSaveTimer);
+  postSaveTimer=setTimeout(()=>{ discardPendingReplay(); removePostSaveButton(); }, 6000); // 6s
+}
+function removePostSaveButton(){
+  if(postSaveBtn && postSaveBtn.parentElement){ postSaveBtn.parentElement.removeChild(postSaveBtn); }
+  postSaveBtn=null; clearTimeout(postSaveTimer); postSaveTimer=null;
+}
+function savePendingReplay(){
+  if(!pendingReplayBlob){
+    downloadWhenReady=true;
+    flash('Preparando arquivo…');
+    return;
+  }
+  doDownloadPendingBlob();
+}
+function doDownloadPendingBlob(){
+  if(!pendingReplayBlob) return;
+  const url = URL.createObjectURL(pendingReplayBlob);
+  const a = document.createElement('a');
+  const when = formatNiceDate(new Date());
+  a.href=url; a.download=`Kicker Hax - Replay - ${when}.mp4`;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  discardPendingReplay(); removePostSaveButton();
+}
+function discardPendingReplay(){
+  pendingReplayBlob=null; pendingReplayMime='video/mp4'; downloadWhenReady=false;
+}
+function cancelAnyReplayArtifacts(){
+  inReplay=false; replayQueue=null; replayIdx=0;
+  if(replayBar) replayBar.style.display='none';
+  removePostSaveButton();
+  if(liveRecActive && liveRec){
+    cancelRecOnStop=true;
+    try{ liveRec.stop(); }catch{}
+    liveRecActive=false;
+  }
+  discardPendingReplay();
 }
 
 /* ===== Replay (fila + estado) ===== */
@@ -1041,6 +1352,178 @@ function sfx(kind){
 }
 function ensureAudio(){ const ac=audioCtx(); if(ac && ac.state==='suspended'){ ac.resume(); } if(!crowdNode) startCrowd(); }
 
+/* ===== Botões de Replay ===== */
+btnSaveReplay && (btnSaveReplay.onclick = ()=>{ /* oculto durante o replay */ });
+btnSkipReplay && (btnSkipReplay.onclick = ()=>{
+  if(inReplay){ endReplay(true); }
+});
+
+/* ===== Encerramento do Replay ===== */
+function endReplay(skipped=false){ 
+  inReplay=false; replayQueue=null; replayIdx=0; 
+  replayBar && (replayBar.style.display='none'); 
+  skipJustHappened = !!skipped;
+  if(skipped){ stopLiveRec(false); }
+  else { stopLiveRec(true); }
+  updateLayoutChrome(); 
+  startCountdown(); 
+  if(skipped){ setTimeout(()=>{ skipJustHappened=false; }, 1200); }
+}
+
+/* ===== Gols / Countdown ===== */
+function triggerGoal(side, toucher){
+  if(justScored) return;
+  justScored=true;
+  lastGoalSide = side;
+  if(side==='blue') score.blue++; else score.red++;
+  uiScore && (uiScore.textContent=`${score.red} : ${score.blue}`);
+  const own = !!(toucher && ((side==='blue' && toucher.team===Team.RED) || (side==='red' && toucher.team===Team.BLUE)));
+  lastOwnGoal = own;
+  lastScorer = (toucher && toucher.name)? toucher.name : 'Desconhecido';
+  sfx('whistle'); sfx('goal'); sfx('cheer');
+
+  // Congelar o jogo por 2s ANTES do replay (replay inclui esse tempo)
+  goalFreeze = GOAL_FREEZE_FRAMES;
+  startReplayPending = true; // será disparado após o congelamento
+}
+
+function startCountdown(){
+  kickoff();
+  inCountdown=true;
+  goalCooldown=150;          // ~2.5s
+  paused=false;              // loop continua (para gravar/animar UI)
+}
+
+/* ===== Loop / Draw ===== */
+let shakeTime=0; function shake(fr=8){ shakeTime=Math.max(shakeTime,fr); }
+function drawField(){
+  ctx.clearRect(0,0,W,H);
+  if(shakeTime>0){shakeTime--; ctx.save(); ctx.translate((Math.random()-.5)*6,(Math.random()-.5)*6); }
+  drawFieldBase(ctx);
+  if(shakeTime>0) ctx.restore();
+}
+function drawCenterBanner(title,subtitle){
+  ctx.save(); ctx.globalAlpha=.95; const w=640,h=160,x=W/2-w/2,y=H*0.25;
+  ctx.fillStyle='rgba(2,6,23,.88)'; ctx.fillRect(x,y,w,h); ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+  ctx.fillStyle='#e2e8f0'; ctx.font='800 24px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(title, W/2, y+60);
+  ctx.font='16px system-ui'; ctx.fillStyle='#a5b4fc'; ctx.fillText(subtitle, W/2, y+100);
+  ctx.restore();
+}
+function updateSidebars(){
+  const p1=players.find(x=>!x.cpu && x.team===Team.BLUE) || blueTeam[0];
+  const p2h=players.find(x=>!x.cpu && x.team===Team.RED) || redTeam[0];
+  leftStamFill && (leftStamFill.style.height = (p2h? clamp(p2h.stamina,0,1)*100 : 0) + '%');
+  leftPowFill && (leftPowFill.style.height  = (p2h? clamp(p2h.kickCharge,0,1)*100 : 0) + '%');
+  rightStamFill && (rightStamFill.style.height= (p1? clamp(p1.stamina,0,1)*100 : 0) + '%');
+  rightPowFill && (rightPowFill.style.height = (p1? clamp(p1.kickCharge,0,1)*100 : 0) + '%');
+}
+
+/* ===== Validação de mapeamento ===== */
+const REQ_KEYS=['up','down','left','right','shoot','dribble','tackle','power'];
+function hasKey(v){ return typeof v==='string' && v.length>0; }
+function playerMappingComplete(C){
+  if(!C) return false;
+  for(const k of REQ_KEYS){ if(!hasKey(C[k])) return false; }
+  if(!C.sprintCode) return false;
+  return true;
+}
+function mappingsComplete(){
+  const needP2 = (pending.mode==='versus' || versus);
+  const ok1 = playerMappingComplete(CTRL_P1);
+  const ok2 = needP2 ? playerMappingComplete(CTRL_P2) : true;
+  return ok1 && ok2;
+}
+
+let lastTick=performance.now();
+function tick(){
+  const t=performance.now(); const dt=Math.min(33,t-lastTick); lastTick=t;
+
+  // REPLAY em andamento (render step-by-step, respeitando pause do replay)
+  if(inReplay){ 
+    updateRecorderPauseState(); // manter recorder em sincronia com pausas
+    if(stepReplay()){ updateSidebars(); requestAnimationFrame(tick); return; } 
+  }
+
+  // Congelamento pós-gol (2s): todo mundo parado, mas gravando frames
+  if(goalFreeze>0){
+    goalFreeze--;
+    drawField(); ball.draw(); for(const p of players) p.draw();
+    drawNetOverlay(ctx);
+    let scorerTeam = (lastGoalSide==='blue'?'Azul':'Vermelho');
+    if(lastOwnGoal){ scorerTeam = (lastGoalSide==='blue'?'Vermelho':'Azul'); }
+    const title = lastOwnGoal ? `GOL CONTRA de ${lastScorer} (${scorerTeam})` : `GOL DE ${lastScorer} (${scorerTeam})!`;
+    drawCenterBanner(title, `Revisando jogada…`);
+    // grava o frame congelado para o buffer de replay
+    recordFrame();
+    if(goalFreeze===0 && startReplayPending){ startReplayPending=false; startReplay(); }
+    updateSidebars(); requestAnimationFrame(tick); return;
+  }
+
+  // Contagem para novo kickoff (após fim do replay)
+  if(inCountdown){
+    goalCooldown--;
+    const secs=Math.max(0,Math.ceil(goalCooldown/60));
+    drawField(); ball.draw(); for(const p of players) p.draw(); 
+    drawNetOverlay(ctx);
+    let scorerTeam = (lastGoalSide==='blue'?'Azul':'Vermelho');
+    if(lastOwnGoal){ scorerTeam = (lastGoalSide==='blue'?'Vermelho':'Azul'); }
+    const title = lastOwnGoal ? `GOL CONTRA de ${lastScorer} (${scorerTeam})` : `GOL DE ${lastScorer} (${scorerTeam})!`;
+    drawCenterBanner(title, `Recomeça em ${secs}…`);
+    if(goalCooldown<=0){ inCountdown=false; paused=false; justScored=false; }
+    updateSidebars(); requestAnimationFrame(tick); return;
+  }
+
+  // FIM DE PARTIDA — iniciar freeze de 3s ao zerar
+  if(!matchEnded && matchTime<=0 && gameStarted){
+    matchEnded=true;
+    endFreeze = END_FREEZE_FRAMES;
+  }
+
+  // Congelamento de 3s no fim de jogo
+  if(endFreeze>0){
+    endFreeze--;
+    drawField(); ball.draw(); for(const p of players) p.draw(); 
+    drawNetOverlay(ctx);
+    const result = (score.red>score.blue?'Vermelho venceu!':score.blue>score.red?'Azul venceu!':'Empate!');
+    drawCenterBanner(result, 'Abrindo menu para reiniciar…');
+    // gravamos frame (só para o buffer, não há replay)
+    recordFrame();
+    if(endFreeze===0){
+      gameStarted=false; endMatchLock=true;
+      if(!postMatchMenuShown){ setMenuOpen(true); postMatchMenuShown=true; flash('Fim de jogo — use Reiniciar para nova partida'); updateBlocks(); }
+    }
+    updateSidebars(); requestAnimationFrame(tick); return;
+  }
+
+  if(!paused){
+    if(gameStarted && matchTime>0){ matchTime -= dt/1000; if(matchTime<0) matchTime=0; }
+    if(gameStarted){
+      for(const p of players){ if(p.cpu) p.inputCPU(); else p.inputHuman(p===me?CTRL_P1:CTRL_P2); p.physics(); }
+      resolvePlayerPlayer(); playerBallCollisions();
+      for(const p of players){ if(p.tackleEval>0 && ball.owner===p) p.tackleSuccess=true; }
+      ball.physics(); 
+      recordFrame();
+    }
+  }
+
+  drawField(); ball.draw(); for(const p of players) p.draw(); 
+  drawNetOverlay(ctx);
+
+  const m=Math.floor(matchTime/60), s=Math.floor(matchTime%60);
+  uiClock && (uiClock.textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
+  uiScore && (uiScore.textContent=`${score.red} : ${score.blue}`);
+
+  if(endMatchLock){
+    const result = (score.red>score.blue?'Vermelho venceu!':score.blue>score.red?'Azul venceu!':'Empate!');
+    drawCenterBanner(result, 'Abra o menu para reiniciar');
+  }
+
+  updateSidebars();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
 /* ===== UI/Menu ===== */
 let needsRestart=false;
 function fitMenuCard(){
@@ -1054,11 +1537,21 @@ function fitMenuCard(){
   menuCard.style.transform = `scale(${s})`;
 }
 function setMenuOpen(open){
+  if(open){
+    if(inReplay) replayPaused=true;          // replay pausa com o menu
+    clearAllInputs();                        // impede “andar sozinho”
+  }else{
+    if(inReplay) replayPaused=false;         // retoma ao fechar menu
+  }
   menuOpen=open;
   if(menu) menu.style.display=open?'grid':'none';
   fitMenuCard();
+
   paused = menuOpen || inReplay || autoPaused;
   setOutputMuted(menuOpen||autoPaused);
+
+  updateRecorderPauseState();
+
   if(open){ btnPlay && btnPlay.focus(); }
   else { cvs && cvs.focus(); if(inReplay && replayBar) replayBar.style.display='flex'; }
   updateLayoutChrome(); requestAnimationFrame(updateLayoutChrome);
@@ -1066,15 +1559,18 @@ function setMenuOpen(open){
 
 openMenu && (openMenu.onclick = ()=>setMenuOpen(true));
 btnClose && (btnClose.onclick = ()=>{
+  if(endMatchLock){ flash('Fim de jogo — use Reiniciar para jogar de novo'); setMenuOpen(true); return; }
   if(isPendingDirty()){ flash('Reinicie para aplicar as mudanças'); setMenuOpen(true); return; }
-  if(!gameStarted || !versusSelected){ flash('Escolha um modo'); setMenuOpen(true); return; }
+  if(!versusSelected){ flash('Escolha um modo'); setMenuOpen(true); return; }
   setMenuOpen(false);
 });
 btnSolo && (btnSolo.onclick = ()=>{ pending.mode='solo'; versusSelected=true; modeLabel && (modeLabel.textContent='Solo 1x1'); btnSolo.classList.add('active'); btnVersus && btnVersus.classList.remove('active'); refreshDirty(); fitMenuCard(); });
 btnVersus && (btnVersus.onclick = ()=>{ pending.mode='versus'; versusSelected=true; modeLabel && (modeLabel.textContent='Versus 2P'); btnVersus.classList.add('active'); btnSolo && btnSolo.classList.remove('active'); refreshDirty(); fitMenuCard(); });
 btnPlay && (btnPlay.onclick = ()=>{ 
+  if(endMatchLock){ flash('Use Reiniciar para iniciar nova partida'); return; }
   if(isPendingDirty()){ flash('Reinicie para aplicar as mudanças'); return; }
   if(!versusSelected){ flash('Escolha um modo'); return; }
+  if(!mappingsComplete()){ flash('Mapeie todas as teclas para iniciar'); return; }
   setMenuOpen(false);
   if(!gameStarted){ applyAllPending(); setupTeams(); kickoff(); gameStarted=true; paused=false; ensureAudio(); }
   else { paused=false; ensureAudio(); }
@@ -1082,6 +1578,7 @@ btnPlay && (btnPlay.onclick = ()=>{
 btnRestart && (btnRestart.onclick = ()=>{ 
   if(!versusSelected){ flash('Escolha um modo'); return; }
   cancelAnyReplayArtifacts();
+  endMatchLock=false; postMatchMenuShown=false; matchEnded=false; endFreeze=0; 
   setMenuOpen(false); applyAllPending(); resetMatch(); paused=false; showNeedsRestart(false); updateBlocks();
 });
 
@@ -1160,11 +1657,22 @@ badgeP2 && badgeP2.addEventListener('input', (e)=>{
 });
 
 function updateBlocks(){
-  const blocked = isPendingDirty();
-  if(btnPlay) btnPlay.disabled = blocked; if(btnClose) btnClose.disabled = blocked;
-  btnPlay && btnPlay.classList.toggle('disabled', blocked);
-  btnClose && btnClose.classList.toggle('disabled', blocked);
-  if(blocked) flash('Reinicie para aplicar as mudanças');
+  const dirty = isPendingDirty();
+  const ended = endMatchLock;
+  const incomplete = !mappingsComplete();
+
+  if(btnPlay){
+    btnPlay.disabled = dirty || ended || incomplete;
+    btnPlay.classList.toggle('disabled', dirty || ended || incomplete);
+  }
+  if(btnClose){
+    // pode fechar o menu mesmo com mapeamento incompleto
+    btnClose.disabled = dirty || ended;
+    btnClose.classList.toggle('disabled', dirty || ended);
+  }
+  if(ended) flash('Fim de jogo — use Reiniciar para jogar de novo');
+  else if(dirty) flash('Reinicie para aplicar as mudanças');
+  else if(incomplete) flash('Mapeie todas as teclas');
 }
 
 /* Aplicar pendentes */
@@ -1217,288 +1725,30 @@ function kickoff(){
   }
   ball.reset();
 }
-function resetMatch(){ score.red=0; score.blue=0; matchTime=baseMinutes*60; justScored=false; inCountdown=false; goalCooldown=0; countdownPaused=false; setupTeams(); kickoff(); gameStarted=true; paused=false; ensureAudio(); }
+function resetMatch(){ score.red=0; score.blue=0; matchTime=baseMinutes*60; justScored=false; inCountdown=false; goalCooldown=0; setupTeams(); kickoff(); gameStarted=true; paused=false; ensureAudio(); }
 function resetScoreOnly(){ score.red=0; score.blue=0; matchTime=baseMinutes*60; uiScore && (uiScore.textContent='0 : 0'); uiClock && (uiClock.textContent='00:00'); }
 
-/* ===== Gols / Countdown ===== */
-function triggerGoal(side, toucher){
-  if(justScored) return;
-  justScored=true;
-  lastGoalSide = side;
-  if(side==='blue') score.blue++; else score.red++;
-  uiScore && (uiScore.textContent=`${score.red} : ${score.blue}`);
-  const own = !!(toucher && ((side==='blue' && toucher.team===Team.RED) || (side==='red' && toucher.team===Team.BLUE)));
-  lastOwnGoal = own;
-  lastScorer = (toucher && toucher.name)? toucher.name : 'Desconhecido';
-  sfx('whistle'); sfx('goal'); sfx('cheer');
-  startReplayPending = true;
-}
+/* ===== Boot ===== */
+function boot(){ renderMapping(); setPendingSize(1024,640); applyAllPending(); updateLayoutChrome(); applyFullscreenLikeState(); }
+boot(); setMenuOpen(true);
 
-function startCountdown(){
-  kickoff();
-  inCountdown=true;
-  goalCooldown=150;          // ~2.5s
-  paused=false;              // NÃO congela o loop
-  countdownPaused=false;     // não pausamos via menu
-}
-
-/* ===== Loop / Draw ===== */
-let shakeTime=0; function shake(fr=8){ shakeTime=Math.max(shakeTime,fr); }
-function drawField(){
-  ctx.clearRect(0,0,W,H);
-  if(shakeTime>0){shakeTime--; ctx.save(); ctx.translate((Math.random()-.5)*6,(Math.random()-.5)*6); }
-  drawFieldBase(ctx);
-  if(shakeTime>0) ctx.restore();
-}
-function drawCenterBanner(title,subtitle){
-  ctx.save(); ctx.globalAlpha=.95; const w=640,h=160,x=W/2-w/2,y=H*0.25;
-  ctx.fillStyle='rgba(2,6,23,.88)'; ctx.fillRect(x,y,w,h); ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.strokeRect(x+.5,y+.5,w-1,h-1);
-  ctx.fillStyle='#e2e8f0'; ctx.font='800 24px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText(title, W/2, y+60);
-  ctx.font='16px system-ui'; ctx.fillStyle='#a5b4fc'; ctx.fillText(subtitle, W/2, y+100);
-  ctx.restore();
-}
-function updateSidebars(){
-  const p1=players.find(x=>!x.cpu && x.team===Team.BLUE) || blueTeam[0];
-  const p2h=players.find(x=>!x.cpu && x.team===Team.RED) || redTeam[0];
-  leftStamFill && (leftStamFill.style.height = (p2h? clamp(p2h.stamina,0,1)*100 : 0) + '%');
-  leftPowFill && (leftPowFill.style.height  = (p2h? clamp(p2h.kickCharge,0,1)*100 : 0) + '%');
-  rightStamFill && (rightStamFill.style.height= (p1? clamp(p1.stamina,0,1)*100 : 0) + '%');
-  rightPowFill && (rightPowFill.style.height = (p1? clamp(p1.kickCharge,0,1)*100 : 0) + '%');
-}
-
-let lastTick=performance.now();
-function tick(){
-  const t=performance.now(); const dt=Math.min(33,t-lastTick); lastTick=t;
-
-  if(inReplay){ if(stepReplay()){ updateSidebars(); requestAnimationFrame(tick); return; } }
-
-  if(inCountdown){
-    goalCooldown--;
-    const secs=Math.max(0,Math.ceil(goalCooldown/60));
-    drawField(); ball.draw(); for(const p of players) p.draw(); 
-    drawNetOverlay(ctx);
-    let scorerTeam = (lastGoalSide==='blue'?'Azul':'Vermelho');
-    if(lastOwnGoal){ scorerTeam = (lastGoalSide==='blue'?'Vermelho':'Azul'); }
-    const title = lastOwnGoal ? `GOL CONTRA de ${lastScorer} (${scorerTeam})` : `GOL DE ${lastScorer} (${scorerTeam})!`;
-    drawCenterBanner(title, `Recomeça em ${secs}...`);
-    if(goalCooldown<=0){ inCountdown=false; paused=false; justScored=false; }
-    updateSidebars(); requestAnimationFrame(tick); return;
-  }
-
-  if(!paused){
-    if(gameStarted && matchTime>0){ matchTime -= dt/1000; if(matchTime<0) matchTime=0; }
-    if(gameStarted){
-      for(const p of players){ if(p.cpu) p.inputCPU(); else p.inputHuman(p===me?CTRL_P1:CTRL_P2); p.physics(); }
-      resolvePlayerPlayer(); playerBallCollisions();
-      for(const p of players){ if(p.tackleEval>0 && ball.owner===p) p.tackleSuccess=true; }
-      ball.physics(); 
-      recordFrame();
-
-      if(startReplayPending){ startReplayPending=false; startReplay(); }
-    }
-  }
-
-  drawField(); ball.draw(); for(const p of players) p.draw(); 
-  drawNetOverlay(ctx);
-
-  const m=Math.floor(matchTime/60), s=Math.floor(matchTime%60);
-  uiClock && (uiClock.textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
-  uiScore && (uiScore.textContent=`${score.red} : ${score.blue}`);
-  if(matchTime<=0 && gameStarted) drawCenterBanner( `${score.red>score.blue?'Vermelho venceu!':score.blue>score.red?'Azul venceu!':'Empate!'}` , 'Abra o menu para reiniciar');
-  updateSidebars();
-  requestAnimationFrame(tick);
-}
-requestAnimationFrame(tick);
-
-/* ===== Inicial ===== */
-function renderAllBoot(){ renderMapping(); setPendingSize(1024,640); applyAllPending(); updateLayoutChrome(); applyFullscreenLikeState(); }
-renderAllBoot(); setMenuOpen(true);
-
-/* ===== REPLAY LIVE-CAPTURE (vídeo+áudio): MP4 OBRIGATÓRIO ===== */
-let liveRec=null;
-let liveRecChunks=[];
-let liveRecActive=false;
-let recSupported=true;          // se não houver MP4, desativamos oferta de salvar
-let cancelRecOnStop=false;
-let pendingReplayBlob=null;
-let pendingReplayMime='video/mp4'; // default para extensão
-let postSaveBtn=null;
-let postSaveTimer=null;
-let downloadWhenReady=false;
-let skipJustHappened=false;
-
-function formatNiceDate(d=new Date()){
-  const p2=n=>String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}-${p2(d.getMinutes())}-${p2(d.getSeconds())}`;
-}
-
-function pickStrictMp4Mime(){
-  const candidates=[
-    'video/mp4;codecs=avc1,mp4a',
-    'video/mp4;codecs=h264,aac',
-    'video/mp4'
-  ];
-  for(const m of candidates){
-    try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch{}
-  }
-  return '';
-}
-
-function startLiveReplayRecording(){
-  try{
-    pendingReplayBlob=null; pendingReplayMime='video/mp4'; downloadWhenReady=false;
-    recSupported=true;
-    if(liveRecActive && liveRec){ cancelRecOnStop=true; try{liveRec.stop();}catch{} }
-
-    ensureBuses();
-    const fps=30;
-    const vStream = cvs.captureStream ? cvs.captureStream(fps) : null;
-    const aStream = recDest ? recDest.stream : null;
-    if(!vStream || !aStream){ flash('Replay: captura indisponível'); recSupported=false; return; }
-
-    const mime = pickStrictMp4Mime();
-    if(!mime){
-      recSupported=false;
-      flash('Seu navegador não suporta gravação MP4 (H.264 + AAC).');
-      return;
-    }
-
-    const stream = new MediaStream([ ...vStream.getVideoTracks(), ...aStream.getAudioTracks() ]);
-    liveRecChunks=[]; 
-    liveRec = new MediaRecorder(stream, {mimeType:mime, videoBitsPerSecond:4_000_000, audioBitsPerSecond:192_000});
-    pendingReplayMime = mime;
-
-    liveRec.ondataavailable = e=>{ if(e.data && e.data.size) liveRecChunks.push(e.data); };
-    liveRec.onstop = ()=>{
-      if(cancelRecOnStop){
-        cancelRecOnStop=false; liveRec=null; liveRecChunks=[]; liveRecActive=false; return;
-      }
-      const blob = new Blob(liveRecChunks, {type:pendingReplayMime});
-      pendingReplayBlob = blob;
-      liveRec=null; liveRecChunks=[]; liveRecActive=false;
-      if(downloadWhenReady){ doDownloadPendingBlob(); }
-    };
-    liveRec.start();
-    liveRecActive=true;
-  }catch(e){ console.error(e); flash('Replay: falha ao iniciar gravação'); recSupported=false; }
-}
-
-function stopLiveRec(offerSave){
-  try{
-    if(!recSupported) return; // MP4 não disponível -> não oferecer salvar
-    if(!liveRecActive || !liveRec){
-      if(offerSave) showPostReplaySaveButton();
-      return;
-    }
-    if(!offerSave){
-      cancelRecOnStop=true;
-      liveRec.stop();
-      liveRecActive=false;
-      return;
-    }
-    liveRec.stop();
-    liveRecActive=false;
-    showPostReplaySaveButton();
-  }catch{}
-}
-
-/* Mostrar salvar por 10s ao lado direito do MENU (pulsando) */
-function showPostReplaySaveButton(){
-  if(!recSupported) return;
-  if(skipJustHappened) return;
-  removePostSaveButton();
-  const menuBtn = document.getElementById('openMenu');
-  const btn = document.createElement('button');
-  btn.id='postSaveReplay';
-  btn.className='btn pill pulse-btn';
-  btn.textContent='Salvar replay';
-  btn.style.marginLeft='8px';
-  btn.onclick = ()=>{ savePendingReplay(); };
-  attachRipple(btn);
-  if(menuBtn && menuBtn.parentElement){
-    if(menuBtn.nextSibling) menuBtn.parentElement.insertBefore(btn, menuBtn.nextSibling);
-    else menuBtn.parentElement.appendChild(btn);
-  } else {
-    topbar && topbar.appendChild(btn);
-  }
-  postSaveBtn=btn;
-  clearTimeout(postSaveTimer);
-  postSaveTimer=setTimeout(()=>{ discardPendingReplay(); removePostSaveButton(); }, 10000);
-}
-
-function removePostSaveButton(){
-  if(postSaveBtn && postSaveBtn.parentElement){ postSaveBtn.parentElement.removeChild(postSaveBtn); }
-  postSaveBtn=null; clearTimeout(postSaveTimer); postSaveTimer=null;
-}
-
-function savePendingReplay(){
-  if(!pendingReplayBlob){
-    downloadWhenReady=true;
-    flash('Preparando arquivo…');
-    return;
-  }
-  doDownloadPendingBlob();
-}
-function doDownloadPendingBlob(){
-  if(!pendingReplayBlob) return;
-  const url = URL.createObjectURL(pendingReplayBlob);
-  const a = document.createElement('a');
-  const when = formatNiceDate(new Date());
-  const ext = 'mp4'; // sempre mp4
-  a.href=url; a.download=`Kicker Hax - Replay - ${when}.${ext}`;
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  discardPendingReplay(); removePostSaveButton();
-}
-
-function discardPendingReplay(){
-  pendingReplayBlob=null; pendingReplayMime='video/mp4'; downloadWhenReady=false;
-}
-
-function cancelAnyReplayArtifacts(){
-  inReplay=false; replayQueue=null; replayIdx=0;
-  if(replayBar) replayBar.style.display='none';
-  removePostSaveButton();
-  if(liveRecActive && liveRec){
-    cancelRecOnStop=true;
-    try{ liveRec.stop(); }catch{}
-    liveRecActive=false;
-  }
-  discardPendingReplay();
-}
-
-/* ===== Botões de Replay ===== */
-btnSaveReplay && (btnSaveReplay.onclick = ()=>{ /* oculto durante o replay */ });
-btnSkipReplay && (btnSkipReplay.onclick = ()=>{
-  if(inReplay){ endReplay(true); }
-});
-
-/* ===== Encerramento do Replay ===== */
-function endReplay(skipped=false){ 
-  inReplay=false; replayQueue=null; replayIdx=0; 
-  replayBar && (replayBar.style.display='none'); 
-  skipJustHappened = !!skipped;
-  if(skipped){ stopLiveRec(false); }
-  else { stopLiveRec(true); }
-  updateLayoutChrome(); 
-  startCountdown(); 
-  if(skipped){ setTimeout(()=>{ skipJustHappened=false; }, 1200); }
-}
-
-/* ===== Auto pausa por visibilidade ===== */
+/* ===== Auto pausa / visibilidade ===== */
 function applyAutoPauseState(){
   const shouldPause=document.hidden||!document.hasFocus(); 
   autoPaused=shouldPause; 
-  setOutputMuted(shouldPause||menuOpen);
-  if(shouldPause){ if(inReplay) replayPaused=true; }
-  else { if(inReplay && !menuOpen) replayPaused=false; }
+  if(shouldPause){
+    if(!menuOpen) setMenuOpen(true);
+    if(inReplay) replayPaused=true;
+    clearAllInputs(); // evita teclas presas
+  }else{
+    // Ao voltar, mantém o menu aberto; usuário decide quando fechar
+  }
+  setOutputMuted(menuOpen||autoPaused);
   paused = menuOpen || inReplay || autoPaused;
+  updateRecorderPauseState();
 }
 document.addEventListener('visibilitychange', applyAutoPauseState);
 window.addEventListener('blur', applyAutoPauseState);
 window.addEventListener('focus', applyAutoPauseState);
 
-/* ===== Boot ===== */
-function boot(){ renderMapping(); setPendingSize(1024,640); applyAllPending(); updateLayoutChrome(); applyFullscreenLikeState(); }
-boot(); setMenuOpen(true);
 })();
