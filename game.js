@@ -1,4 +1,4 @@
-/* ===== Kicker Hax – game.js
+/* ===== Super Haxball+ – game.js
    ARQUIVO COMPLETO (sem resumo)
    Atualização desta versão:
    • Remapeamento:
@@ -13,17 +13,6 @@
    • Power Shoot continua funcionando em diagonais (mantido).
    • IA: perto do gol/trave, a CPU evita “entrar com a bola” e prioriza chute
      rápido; se errar, tenta novo chute ao invés de conduzir para dentro.
-
-   ====== NOVO – Modo Online (integração básica) ======
-   • Suporte a lobby/salas P2P via hooks em window.KHNet (definidos no index.html):
-     - Host: recebe onHostStart(payload) e onClientInput(clientId, data).
-     - Client: recebe onStart(payload) e onSnapshot(state). (Preparado aqui.)
-   • Host roda a física de forma autoritativa, aceita inputs dos clientes e
-     (se o index expor) transmite “snapshots” do estado para os clientes.
-   • Cada jogador online controla apenas seu próprio jogador (host mapeia
-     clientId -> jogador). O HUD de stamina/força fica oculto no online
-     para respeitar a privacidade solicitada.
-   • Suporte a escala 1x1 até 6x6 no modo online (formações distribuídas).
 ====================================================================== */
 
 (()=>{
@@ -35,22 +24,6 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const rnd=(a,b)=>a+Math.random()*(b-a);
 const CENTER=()=>({x:W/2,y:H/2});
 const TAU=Math.PI*2; const nA=a=>{a%=TAU; return a<-Math.PI?a+TAU:a>Math.PI?a-TAU:a}; const lerpAng=(a,b,t)=>{a=nA(a); b=nA(b); let d=nA(b-a); return a+d*t;};
-
-/* ====== NET (modo online) ====== */
-const NET = {
-  mode: 'offline',         // 'offline' | 'host' | 'client'
-  isHost: false,
-  isClient: false,
-  teamSize: 1,
-  playersByClient: new Map(),   // clientId -> Player (apenas host)
-  snapshotTick: 0,
-  localInputPrev: {sh:false,pow:false,dri:false,tac:false},
-  localShootCharge: 0,
-  localShootHeld: false,
-  meClientId: null,             // (client) se o index enviar
-  // Aux: esconder HUD de stamina/power no online (privacidade)
-  hideHud: false,
-};
 
 /* Graphemes (clusters) – para lidar com EMOJI corretamente */
 function segmentGraphemes(text){
@@ -681,11 +654,6 @@ class Player extends Body{
     this.invuln=0; this.tackle_cd=0; this.dribble_cd=0; this.dash_time=0; this.power_cd=0; this.tackleFreeze=0;
     this.tackleEval=0; this.tackleSuccess=false; this.aiShootLock=0; this.aiFeintLock=0;
     this.shootHalo=0; // halo preto ao chutar/power
-
-    // Online
-    this.netControlled = false; // true = comandos vindos da rede (host aplica)
-    this.netState = {u:0,d:0,l:0,r:0,s:0,sh:0,ch:0,pow:0,dri:0,tac:0,rel:0};
-    this.clientId = null; // quem controla (apenas host sabe)
   }
   spendStamina(amount){ if(this.staminaLock>0) return false; if(this.stamina<amount) { this.stamina=0; this.staminaLock=STAMINA_LOCK_FRAMES; return false; } this.stamina=clamp(this.stamina-amount,0,1); if(this.stamina===0) this.staminaLock=STAMINA_LOCK_FRAMES; return true; }
   spendStaminaFrac(frac){
@@ -702,64 +670,6 @@ class Player extends Body{
     const drain = DRAIN_SPRINT;
     if(sprinting){ this.stamina=clamp(this.stamina - drain, 0, 1); if(this.stamina===0) this.staminaLock=STAMINA_LOCK_FRAMES; }
     else { this.stamina=clamp(this.stamina + regen, 0, 1); }
-  }
-  inputNet(){
-    // Host aplica comandos vindos da rede para este jogador
-    const n=this.netState||{u:0,d:0,l:0,r:0,s:0,sh:0,ch:0,pow:0,dri:0,tac:0,rel:0};
-    if(this.stun>0){ this.kickCharge=0; return; }
-
-    // Direção e sprint
-    let ax=(n.l?-1:0)+(n.r?1:0), ay=(n.u?-1:0)+(n.d?1:0);
-    const L = Math.hypot(ax,ay)||1;
-    const sprintPressed = !!n.s;
-    const canSprint = sprintPressed && this.staminaLock<=0 && this.stamina>0;
-    this.staminaTick(!!canSprint);
-    const slowMul=this.slowTimer>0?0.7:1; if(this.slowTimer>0) this.slowTimer--;
-    const effMul=canSprint? (1+(1.30-1)*this.stamina):1;
-    const s=MAX_SPEED*effMul*slowMul; const dashBoost=(this.dash_time>0?1.7:1);
-    this.vx=this.vx*FRICTION_PLAYER+(ax/L)*s*0.12*dashBoost; this.vy=this.vy*FRICTION_PLAYER+(ay/L)*s*0.12*dashBoost;
-    if(ax||ay){ const targetAng=Math.atan2(ay,ax); this.dir = lerpAng(this.dir,targetAng,0.35); this.lastMoveDir=this.dir; } else this.dir=this.lastMoveDir||0;
-
-    // Power
-    if(n.pow && this.power_cd<=0 && (ball.owner===this || touchBall(this,ball)) && this.stun<=0 && this.stamina>=0.98 && this.staminaLock<=0){
-      const aim = getAimAngleFromNet(n, this);
-      powerKick(this, aim); sfx('power'); this.forceZeroAndLock(); this.aiShootLock=160; this.shootHalo=22;
-    }
-
-    // Drible (gatilho)
-    if(n.dri && this.dribble_cd<=0 && ball.owner===this && this.stun<=0){
-      if(this.stamina >= DRIBBLE_STAM_COST && this.spendStamina(DRIBBLE_STAM_COST)){
-        this.dash_time=DRIBBLE_TIME; this.invuln=DRIBBLE_INVULN; this.dribble_cd=DRIBBLE_CD;
-        this.vx+=Math.cos(this.dir)*DRIBBLE_DASH; this.vy+=Math.sin(this.dir)*DRIBBLE_DASH;
-        sfx('dribble');
-      }
-    }
-
-    // Desarme (gatilho)
-    const canTackleTarget = ball.owner && ball.owner!==this && ball.owner.team!==this.team;
-    if(n.tac && this.tackle_cd<=0 && canTackleTarget && this.stun<=0){
-      if(this.stamina >= TACKLE_STAM_COST && this.spendStamina(TACKLE_STAM_COST)){ attemptTackle(this); this.tackle_cd=TACKLE_CD; }
-    }
-
-    // Chute (sob soltar) – host recebe ch=charge e rel=edge
-    if(n.rel){
-      const ch = clamp(n.ch||0, 0, 1);
-      const minPow = 2.2;
-      const pow = Math.max(minPow, KICK_BASE + KICK_CHARGE * ch);
-      const costFrac = Math.max(0.08, 0.40 * ch);
-      if(!(this.staminaLock>0 || this.stamina < costFrac) && (touchBall(this,ball) || ball.owner===this)){
-        const aim = getAimAngleFromNet(n, this);
-        kickBall(this, aim, pow); sfx('kick'); this.cool=14; this.kickCharge=0; this.aiShootLock=120;
-        this.spendStaminaFrac(costFrac);
-        this.shootHalo=18;
-      } else {
-        this.kickCharge=0;
-      }
-    } else {
-      // acumular visual local do host (não estraga nada)
-      if(n.sh){ this.kickCharge = Math.min(1, this.kickCharge + 0.065); }
-      else { this.kickCharge *= 0.95; }
-    }
   }
   inputHuman(ctrl){
     if(this.stun>0){ this.kickCharge=0; return; } // congelado
@@ -895,7 +805,7 @@ class Player extends Body{
 
     const targetOwner = ball.owner && ball.owner.team!==this.team ? ball.owner : null;
     if(targetOwner && this.tackle_cd<=0 && this.staminaLock<=0 && this.stamina>=TACKLE_STAM_COST){
-      const d = Math.hypot(targetOwner.x-this.x,targetOwner.y-this.y);
+      const d = Math.hypot(targetOwner.x-this.x, targetOwner.y-this.y);
       const angTo = Math.atan2(targetOwner.y-this.y, targetOwner.x-this.x);
       const front = Math.cos(nA(angTo-(this.dir||0)));
       const futureReach = d - TACKLE_LUNGE*8;
@@ -1021,12 +931,6 @@ function getAimAngleFromHeld(ctrl, p){
   if(keys.get(ctrl.down)) ay+=1;
   if(keys.get(ctrl.left)) ax-=1;
   if(keys.get(ctrl.right)) ax+=1;
-  if(ax===0 && ay===0) return p?.dir || 0;
-  return Math.atan2(ay, ax);
-}
-/* Para NET: mirar a partir de u/d/l/r booleans */
-function getAimAngleFromNet(n, p){
-  let ax=(n.l?-1:0)+(n.r?1:0), ay=(n.u?-1:0)+(n.d?1:0);
   if(ax===0 && ay===0) return p?.dir || 0;
   return Math.atan2(ay, ax);
 }
@@ -1507,14 +1411,6 @@ function drawCenterBanner(title,subtitle){
   ctx.restore();
 }
 function updateSidebars(){
-  // HUD de stamina/power é oculto quando em modo online (privacidade)
-  if(NET.mode!=='offline'){
-    leftStamFill && (leftStamFill.style.height = '0%');
-    leftPowFill && (leftPowFill.style.height  = '0%');
-    rightStamFill && (rightStamFill.style.height= '0%');
-    rightPowFill && (rightPowFill.style.height = '0%');
-    return;
-  }
   const p1=players.find(x=>!x.cpu && x.team===Team.BLUE) || blueTeam[0];
   const p2h=players.find(x=>!x.cpu && x.team===Team.RED) || redTeam[0];
   leftStamFill && (leftStamFill.style.height = (p2h? clamp(p2h.stamina,0,1)*100 : 0) + '%');
@@ -1542,12 +1438,6 @@ function mappingsComplete(){
 let lastTick=performance.now();
 function tick(){
   const t=performance.now(); const dt=Math.min(33,t-lastTick); lastTick=t;
-
-  // Enviar input local para o host (cliente online)
-  if(NET.mode==='client' && window.KHNet && typeof window.KHNet.sendInput==='function'){
-    const inp = collectClientInputFrame();
-    try{ window.KHNet.sendInput(inp); }catch{}
-  }
 
   // REPLAY em andamento (render step-by-step, respeitando pause do replay)
   if(inReplay){ 
@@ -1591,76 +1481,29 @@ function tick(){
   }
 
   // Congelamento de 3s no fim de jogo
-if (endFreeze > 0) {
-
-  endFreeze--;
-  drawField(); ball.draw(); for (const p of players) p.draw();
-  drawNetOverlay(ctx);
-  const result = (score.red > score.blue ? 'Vermelho venceu!' : score.blue > score.red ? 'Azul venceu!' : 'Empate!');
-  drawCenterBanner(result, 'Abrindo menu para reiniciar…');
-
-  // gravamos frame (só para o buffer, não há replay)
-  recordFrame();
-
-    if (endFreeze === 0) {
-      // 🔔 Dispara evento global de fim de partida (para Firebase / estatísticas)
-      try {
-        const payload = {
-          red: score.red,
-          blue: score.blue,
-          mode: appliedState?.mode ?? (versus ? 'versus' : 'solo'),
-          p1: appliedState?.names?.p1 ?? 'P1',
-          p2: appliedState?.names?.p2 ?? 'P2',
-          size: appliedState?.size ?? { w: W, h: H },
-          when: Date.now()
-        };
-        dispatchEvent(new CustomEvent('shb:matchEnd', { detail: payload }));
-      } catch (e) {
-        // silencioso: se algo falhar, não quebra o jogo
-        console.warn('Falha ao emitir shb:matchEnd', e);
-      }
-
-      gameStarted = false;
-      endMatchLock = true;
-      if (!postMatchMenuShown) {
-        setMenuOpen(true);
-        postMatchMenuShown = true;
-        flash('Fim de jogo — use Reiniciar para nova partida');
-        updateBlocks();
-      }
+  if(endFreeze>0){
+    endFreeze--;
+    drawField(); ball.draw(); for(const p of players) p.draw(); 
+    drawNetOverlay(ctx);
+    const result = (score.red>score.blue?'Vermelho venceu!':score.blue>score.red?'Azul venceu!':'Empate!');
+    drawCenterBanner(result, 'Abrindo menu para reiniciar…');
+    // gravamos frame (só para o buffer, não há replay)
+    recordFrame();
+    if(endFreeze===0){
+      gameStarted=false; endMatchLock=true;
+      if(!postMatchMenuShown){ setMenuOpen(true); postMatchMenuShown=true; flash('Fim de jogo — use Reiniciar para nova partida'); updateBlocks(); }
     }
-
-    updateSidebars();
-    requestAnimationFrame(tick);
-    return;
+    updateSidebars(); requestAnimationFrame(tick); return;
   }
-
 
   if(!paused){
     if(gameStarted && matchTime>0){ matchTime -= dt/1000; if(matchTime<0) matchTime=0; }
     if(gameStarted){
-      for(const p of players){
-        if(NET.mode==='host' && p.netControlled){ p.inputNet(); }
-        else if(p.cpu) p.inputCPU();
-        else p.inputHuman(p===me?CTRL_P1:CTRL_P2);
-        p.physics();
-      }
+      for(const p of players){ if(p.cpu) p.inputCPU(); else p.inputHuman(p===me?CTRL_P1:CTRL_P2); p.physics(); }
       resolvePlayerPlayer(); playerBallCollisions();
       for(const p of players){ if(p.tackleEval>0 && ball.owner===p) p.tackleSuccess=true; }
       ball.physics(); 
       recordFrame();
-
-      // Host: transmite snapshot se o index expuser o método (não quebra se inexistente)
-      if(NET.mode==='host'){
-        NET.snapshotTick++;
-        if(NET.snapshotTick%3===0){ // ~20Hz
-          try{
-            if(window.KHNet && typeof window.KHNet.__hostBroadcastSnapshot==='function'){
-              window.KHNet.__hostBroadcastSnapshot(buildSnapshot());
-            }
-          }catch{}
-        }
-      }
     }
   }
 
@@ -1718,13 +1561,12 @@ openMenu && (openMenu.onclick = ()=>setMenuOpen(true));
 btnClose && (btnClose.onclick = ()=>{
   if(endMatchLock){ flash('Fim de jogo — use Reiniciar para jogar de novo'); setMenuOpen(true); return; }
   if(isPendingDirty()){ flash('Reinicie para aplicar as mudanças'); setMenuOpen(true); return; }
-  if(!versusSelected && NET.mode==='offline'){ flash('Escolha um modo'); setMenuOpen(true); return; }
+  if(!versusSelected){ flash('Escolha um modo'); setMenuOpen(true); return; }
   setMenuOpen(false);
 });
 btnSolo && (btnSolo.onclick = ()=>{ pending.mode='solo'; versusSelected=true; modeLabel && (modeLabel.textContent='Solo 1x1'); btnSolo.classList.add('active'); btnVersus && btnVersus.classList.remove('active'); refreshDirty(); fitMenuCard(); });
 btnVersus && (btnVersus.onclick = ()=>{ pending.mode='versus'; versusSelected=true; modeLabel && (modeLabel.textContent='Versus 2P'); btnVersus.classList.add('active'); btnSolo && btnSolo.classList.remove('active'); refreshDirty(); fitMenuCard(); });
 btnPlay && (btnPlay.onclick = ()=>{ 
-  if(NET.mode!=='offline'){ setMenuOpen(false); ensureAudio(); return; } // no online, menu só fecha
   if(endMatchLock){ flash('Use Reiniciar para iniciar nova partida'); return; }
   if(isPendingDirty()){ flash('Reinicie para aplicar as mudanças'); return; }
   if(!versusSelected){ flash('Escolha um modo'); return; }
@@ -1734,7 +1576,6 @@ btnPlay && (btnPlay.onclick = ()=>{
   else { paused=false; ensureAudio(); }
 });
 btnRestart && (btnRestart.onclick = ()=>{ 
-  if(NET.mode!=='offline'){ flash('No online, o host controla o reinício.'); return; }
   if(!versusSelected){ flash('Escolha um modo'); return; }
   cancelAnyReplayArtifacts();
   endMatchLock=false; postMatchMenuShown=false; matchEnded=false; endFreeze=0; 
@@ -1743,7 +1584,6 @@ btnRestart && (btnRestart.onclick = ()=>{
 
 /* “Restaurar padrões” reinicia o jogo */
 btnResetMaps && (btnResetMaps.onclick = ()=>{ 
-  if(NET.mode!=='offline'){ flash('Não disponível durante partidas online.'); return; }
   CTRL_P1 = JSON.parse(JSON.stringify(defaultP1));
   CTRL_P2 = JSON.parse(JSON.stringify(defaultP2));
   renderMapping();
@@ -1822,16 +1662,17 @@ function updateBlocks(){
   const incomplete = !mappingsComplete();
 
   if(btnPlay){
-    btnPlay.disabled = (NET.mode==='offline' ? (dirty || ended || incomplete) : false);
-    btnPlay.classList.toggle('disabled', NET.mode==='offline' ? (dirty || ended || incomplete) : false);
+    btnPlay.disabled = dirty || ended || incomplete;
+    btnPlay.classList.toggle('disabled', dirty || ended || incomplete);
   }
   if(btnClose){
+    // pode fechar o menu mesmo com mapeamento incompleto
     btnClose.disabled = dirty || ended;
     btnClose.classList.toggle('disabled', dirty || ended);
   }
   if(ended) flash('Fim de jogo — use Reiniciar para jogar de novo');
   else if(dirty) flash('Reinicie para aplicar as mudanças');
-  else if(incomplete && NET.mode==='offline') flash('Mapeie todas as teclas');
+  else if(incomplete) flash('Mapeie todas as teclas');
 }
 
 /* Aplicar pendentes */
@@ -1866,20 +1707,6 @@ function currentBadge(which){
   return deriveBadgeFromName(nm);
 }
 
-/* ======= FormaçÕES / múltiplos jogadores (1x1 até 6x6) ======= */
-function formationPositions(n, side /* Team.RED/BLUE */){
-  // distribui verticalmente entre as linhas de fundo
-  const marginY = 80, minY = BORDER+marginY, maxY = H-BORDER-marginY;
-  const xs = side===Team.RED ? (BORDER+120*(W/1024)) : (W-BORDER-120*(W/1024));
-  const res=[];
-  for(let i=0;i<n;i++){
-    const t = (i+1)/(n+1);
-    const y = minY + t*(maxY-minY);
-    res.push({x:xs, y});
-  }
-  return res;
-}
-
 /* Times / Kickoff */
 function setupTeams(){
   redTeam.length=0; blueTeam.length=0; players.length=0; me=p2=null;
@@ -1891,16 +1718,9 @@ function setupTeams(){
   renderHelpTips();
   updateLayoutChrome();
 }
-function applyFormationArrays(){
-  // Aplica home/pos init para todos os jogadores baseado na formação
-  const reds = formationPositions(redTeam.length, Team.RED);
-  const blues = formationPositions(blueTeam.length, Team.BLUE);
-  redTeam.forEach((p,i)=>{ p.home={x:reds[i].x, y:reds[i].y}; });
-  blueTeam.forEach((p,i)=>{ p.home={x:blues[i].x, y:blues[i].y}; });
-}
 function kickoff(){
-  applyFormationArrays();
   for(const p of players){
+    p.home={ x: (p.team===Team.RED? BORDER+120*(W/1024) : W-BORDER-120*(W/1024)), y:H*0.5 };
     p.x=p.home.x; p.y=p.home.y; p.vx=p.vy=0; p.kickCharge=0; p.tackle_cd=0; p.dribble_cd=0; p.dash_time=0; p.invuln=0; p.stun=0; p.slowTimer=0; p.power_cd=0; p.tackleFreeze=0; p.stamina=1; p.staminaLock=0; p.tackleEval=0; p.tackleSuccess=false; p.aiShootLock=0; p.aiFeintLock=0; p.shootHalo=0;
   }
   ball.reset();
@@ -1930,178 +1750,5 @@ function applyAutoPauseState(){
 document.addEventListener('visibilitychange', applyAutoPauseState);
 window.addEventListener('blur', applyAutoPauseState);
 window.addEventListener('focus', applyAutoPauseState);
-
-/* ====================================================== */
-/* ===================   ONLINE HOOKS   ================= */
-/* ====================================================== */
-
-/* Host: iniciar a partida a partir do payload do lobby */
-function netHostStart(payload){
-  // payload: {preset, teamSize, teams:{A:[{clientId,name,tag}], B:[...]}}
-  try{
-    NET.mode='host'; NET.isHost=true; NET.isClient=false; NET.teamSize = Math.max(1, Math.min(6, payload.teamSize||1));
-    NET.hideHud = true;
-    // montar times
-    redTeam.length=0; blueTeam.length=0; players.length=0; me=null; p2=null;
-    NET.playersByClient.clear();
-
-    const mkPlayer = (side, pl) => {
-      const name = (pl?.name||'Jogador').slice(0,12);
-      const badge = sanitizeBadgeInput(pl?.tag||'⚽') || deriveBadgeFromName(name);
-      const p = new Player( side===Team.RED ? BORDER+120 : W-BORDER-120, H*0.5, side, false, 'mf', null, name, badge );
-      p.netControlled = true;
-      p.clientId = pl.clientId || null;
-      NET.playersByClient.set(pl.clientId, p);
-      (side===Team.RED?redTeam:blueTeam).push(p);
-      players.push(p);
-    };
-
-    (payload?.teams?.A||[]).forEach(pl => mkPlayer(Team.RED, pl));
-    (payload?.teams?.B||[]).forEach(pl => mkPlayer(Team.BLUE, pl));
-
-    // aplica formação, reseta placar/tempo e dá kickoff
-    score.red=0; score.blue=0;
-    baseMinutes = baseMinutes || 3;
-    matchTime = baseMinutes*60;
-    gameStarted=true; paused=false; ensureAudio();
-    applyFormationArrays(); kickoff();
-    setMenuOpen(false);
-    flash('Partida online iniciada (HOST)');
-  }catch(e){
-    console.warn('netHostStart error', e);
-  }
-}
-
-/* Host: receber input de um cliente */
-function netHostHandleInput(clientId, data){
-  if(NET.mode!=='host') return;
-  const p = NET.playersByClient.get(clientId);
-  if(!p) return;
-  // Normaliza booleans para 0/1
-  const n = p.netState;
-  n.u = !!data.u; n.d = !!data.d; n.l = !!data.l; n.r = !!data.r; n.s = !!data.s;
-  n.sh = !!data.sh; n.ch = +data.ch || 0;
-  n.pow = !!data.pow; n.dri = !!data.dri; n.tac = !!data.tac; n.rel = !!data.rel;
-}
-
-/* Client: receber definição de times do host (quando o index encaminhar) */
-function netClientStart(payload){
-  try{
-    NET.mode='client'; NET.isClient=true; NET.isHost=false; NET.teamSize = Math.max(1, Math.min(6, payload.teamSize||1));
-    NET.hideHud = true;
-
-    redTeam.length=0; blueTeam.length=0; players.length=0; me=null; p2=null;
-
-    const mk = (side, pl) => {
-      const nm = (pl?.name||'Jogador').slice(0,12);
-      const bd = sanitizeBadgeInput(pl?.tag||'⚽') || deriveBadgeFromName(nm);
-      const p = new Player( side===Team.RED ? BORDER+120 : W-BORDER-120, H*0.5, side, false,'mf', null, nm, bd );
-      // No cliente, TODOS são “cpu” de exibição; estados virão por snapshot
-      p.cpu = true;
-      (side===Team.RED?redTeam:blueTeam).push(p); players.push(p);
-    };
-    (payload?.teams?.A||[]).forEach(pl => mk(Team.RED, pl));
-    (payload?.teams?.B||[]).forEach(pl => mk(Team.BLUE, pl));
-    applyFormationArrays(); kickoff();
-    gameStarted=true; paused=false; ensureAudio();
-    setMenuOpen(false);
-    flash('Conectado à partida (CLIENTE)');
-  }catch(e){ console.warn('netClientStart', e); }
-}
-
-/* Client: aplicar snapshot recebido do host (quando o index encaminhar) */
-function netClientApplySnapshot(state){
-  if(NET.mode!=='client') return;
-  try{
-    // score e tempo
-    if(state?.score){ score.red = state.score.red|0; score.blue = state.score.blue|0; }
-    if(typeof state?.time === 'number'){ matchTime = clamp(state.time, 0, 99*60); }
-
-    // bola
-    if(state?.ball){
-      ball.x = state.ball.x||ball.x;
-      ball.y = state.ball.y||ball.y;
-      ball.vx = state.ball.vx||0;
-      ball.vy = state.ball.vy||0;
-      ball.owner = null; // dono não é necessário no cliente (visual)
-    }
-
-    // players
-    if(Array.isArray(state.players)){
-      for(let i=0;i<Math.min(players.length, state.players.length);i++){
-        const ps = state.players[i], p = players[i];
-        if(!ps || !p) continue;
-        p.x = ps.x; p.y = ps.y; p.dir = ps.dir||p.dir; p.vx=ps.vx||0; p.vy=ps.vy||0;
-        p.stun = ps.stun||0; p.invuln = ps.invuln||0; p.shootHalo = ps.halo||0;
-        // stamina/power: não aplicamos no cliente para privacidade
-      }
-    }
-  }catch(e){ console.warn('netClientApplySnapshot', e); }
-}
-
-/* Host: construir snapshot do estado atual */
-function buildSnapshot(){
-  // NÃO inclui stamina/power de ninguém (privacidade). Clientes cuidam apenas do HUD próprio local.
-  return {
-    t: performance.now?.()||Date.now(),
-    time: matchTime,
-    score: { red: score.red|0, blue: score.blue|0 },
-    ball: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
-    players: players.map(p => ({
-      x:p.x,y:p.y,dir:p.dir||0,vx:p.vx||0,vy:p.vy||0,team:p.team,
-      name:p.name||'',badge:p.badge||'',
-      stun:p.stun||0,invuln:p.invuln||0,halo:p.shootHalo||0
-    }))
-  };
-}
-
-/* Client: coletar input do teclado para enviar ao host */
-function collectClientInputFrame(){
-  // Usa o mapeamento do P1 local como padrão
-  const c = CTRL_P1;
-  const u=!!keys.get(c.up), d=!!keys.get(c.down), l=!!keys.get(c.left), r=!!keys.get(c.right);
-  const s=c.sprintCode ? !!codes.get(c.sprintCode) : !!keys.get(c.sprintKey);
-  const sh = !!keys.get(c.shoot);
-  const pow = !!keys.get(c.power) || (c.powerCode && !!codes.get(c.powerCode));
-  const dri = !!keys.get(c.dribble);
-  const tac = !!keys.get(c.tackle);
-
-  // Edge: soltou chute neste frame?
-  const rel = (!!NET.localInputPrev.sh && !sh);
-  // Acúmulo da carga (apenas para o host calcular potência)
-  if(sh) NET.localShootCharge = Math.min(1, NET.localShootCharge + 0.065);
-  else NET.localShootCharge *= 0.95;
-
-  NET.localInputPrev.sh = sh;
-  NET.localInputPrev.pow = pow;
-  NET.localInputPrev.dri = dri;
-  NET.localInputPrev.tac = tac;
-
-  return {u,d,l,r,s, sh, rel, ch: NET.localShootCharge, pow, dri, tac};
-}
-
-/* Conectar hooks em window.KHNet, se existirem */
-(function wireKHNet(){
-  if(!window.KHNet) window.KHNet = {};
-  const KH = window.KHNet;
-  // Host
-  KH.onHostStart = netHostStart;
-  KH.onClientInput = netHostHandleInput;
-  // Client
-  KH.onStart = netClientStart;
-  KH.onSnapshot = netClientApplySnapshot;
-  // Exponha sinalização (opcional), se o index oferecer
-  // KH.__hostBroadcastSnapshot será chamado pelo host se existir (definido no index)
-  window.KHNet = KH;
-})();
-// Expor hooks p/ o index (bridge da rede -> motor do jogo)
-window.netHostStart          = netHostStart;          // host inicia partida no motor
-window.netHostHandleInput    = netHostHandleInput;    // host aplica input do cliente
-window.netClientStart        = netClientStart;        // cliente recebe payload inicial
-window.netClientApplySnapshot= netClientApplySnapshot;// cliente aplica snapshots
-
-// (opcional) se você usa no index:
-// window.buildSnapshot            = buildSnapshot;
-// window.collectClientInputFrame  = collectClientInputFrame;
 
 })();
